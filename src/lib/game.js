@@ -13,6 +13,7 @@ import { db, firebase } from "./firebase";
 
 const MAX_PLAYERS = 2;
 const ROOMS = "rooms";
+const ROOM_CODES = "roomCodes";
 const { FieldValue } = firebase.firestore;
 
 function generateRoomCode() {
@@ -85,6 +86,12 @@ export class GameService {
     };
 
     const docRef = await this.db.collection(ROOMS).add(roomData);
+    await this.db.collection(ROOM_CODES).doc(code).set({
+      roomId: docRef.id,
+      status: "waiting",
+      hostId: user.uid,
+      createdAt: FieldValue.serverTimestamp(),
+    });
     this.roomId = docRef.id;
     return { roomId: docRef.id, code };
   }
@@ -93,44 +100,59 @@ export class GameService {
     const user = getCurrentUser();
     if (!user) throw new Error("Debes iniciar sesión");
 
-    const snapshot = await this.db
-      .collection(ROOMS)
-      .where("code", "==", code.toUpperCase())
-      .where("status", "==", "waiting")
-      .limit(1)
-      .get();
+    const roomCode = code.toUpperCase().trim();
+    const codeRef = this.db.collection(ROOM_CODES).doc(roomCode);
+    const codeDoc = await codeRef.get();
 
-    if (snapshot.empty) {
+    if (!codeDoc.exists) {
       throw new Error("Sala no encontrada o ya en partida");
     }
 
-    const doc = snapshot.docs[0];
-    const data = parseRoomData(doc.data());
-
-    if (data.players.length >= MAX_PLAYERS) {
-      throw new Error("La sala está llena (máximo 2 jugadores)");
+    const { roomId, status: codeStatus } = codeDoc.data();
+    if (codeStatus !== "waiting") {
+      throw new Error("Sala no encontrada o ya en partida");
     }
 
-    if (data.players.some((p) => p.uid === user.uid)) {
-      this.roomId = doc.id;
-      return { roomId: doc.id, code: data.code };
-    }
+    const roomRef = this.db.collection(ROOMS).doc(roomId);
 
-    const updatedPlayers = [...data.players, playerPayload(user)];
-    const boards = {
-      ...data.boards,
-      [user.uid]: emptyPlayerBoard(data.puzzle),
-    };
+    return this.db.runTransaction(async (tx) => {
+      const roomSnap = await tx.get(roomRef);
+      if (!roomSnap.exists) {
+        throw new Error("Sala no encontrada o ya en partida");
+      }
 
-    await doc.ref.update({
-      players: updatedPlayers,
-      playerUids: updatedPlayers.map((p) => p.uid),
-      boards: flattenBoards(boards),
-      updatedAt: FieldValue.serverTimestamp(),
+      const data = parseRoomData(roomSnap.data());
+
+      if (data.status !== "waiting") {
+        throw new Error("Sala no encontrada o ya en partida");
+      }
+
+      if (data.players.length >= MAX_PLAYERS) {
+        throw new Error("La sala está llena (máximo 2 jugadores)");
+      }
+
+      if (data.players.some((p) => p.uid === user.uid)) {
+        return { roomId, code: data.code };
+      }
+
+      const updatedPlayers = [...data.players, playerPayload(user)];
+      const boards = {
+        ...data.boards,
+        [user.uid]: emptyPlayerBoard(data.puzzle),
+      };
+
+      tx.update(roomRef, {
+        players: updatedPlayers,
+        playerUids: updatedPlayers.map((p) => p.uid),
+        boards: flattenBoards(boards),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+
+      return { roomId, code: data.code };
+    }).then((result) => {
+      this.roomId = result.roomId;
+      return result;
     });
-
-    this.roomId = doc.id;
-    return { roomId: doc.id, code: data.code };
   }
 
   async startGame(roomId) {
@@ -148,6 +170,10 @@ export class GameService {
       startedAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
     });
+
+    if (data.code) {
+      await this.db.collection(ROOM_CODES).doc(data.code).update({ status: "playing" });
+    }
   }
 
   listenRoom(roomId, callback) {
@@ -280,6 +306,9 @@ export class GameService {
 
     if (players.length === 0) {
       await docRef.delete();
+      if (data.code) {
+        await this.db.collection(ROOM_CODES).doc(data.code).delete();
+      }
     } else {
       const boards = { ...data.boards };
       delete boards[user.uid];
