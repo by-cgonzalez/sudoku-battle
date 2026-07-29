@@ -7,8 +7,16 @@ import {
   unflattenBoards,
 } from "./sudoku";
 import { createAttack, pruneExpiredAttacks } from "./attacks";
-import { getCurrentUser } from "./auth";
+import { getCurrentUser, getUserDisplayName } from "./auth";
 import { getDifficulty, DEFAULT_DIFFICULTY } from "./difficulty";
+import {
+  DEFAULT_BATTLE_MODE,
+  getBattleMode,
+  HINT_COST,
+  canUseHint,
+  normalizeGameOptions,
+  playerScore,
+} from "./features";
 import { db, firebase } from "./firebase";
 
 const MAX_PLAYERS = 2;
@@ -28,10 +36,11 @@ function generateRoomCode() {
 function playerPayload(user) {
   return {
     uid: user.uid,
-    name: user.displayName || user.email?.split("@")[0] || "Jugador",
+    name: getUserDisplayName(user),
     email: user.email || "",
     photoURL: user.photoURL || "",
     solvedCount: 0,
+    hintsUsed: 0,
   };
 }
 
@@ -49,6 +58,29 @@ function parseRoomData(data) {
   };
 }
 
+function resolveWinner(players, completerUid, battleMode) {
+  if (battleMode === "score") {
+    const ranked = [...players].sort((a, b) => {
+      const scoreDiff = playerScore(b) - playerScore(a);
+      if (scoreDiff !== 0) return scoreDiff;
+      return (a.hintsUsed || 0) - (b.hintsUsed || 0);
+    });
+    const top = ranked[0];
+    const second = ranked[1];
+    if (second && playerScore(top) === playerScore(second)) {
+      const completer = players.find((p) => p.uid === completerUid) || top;
+      return { winner: completer.uid, winnerName: completer.name };
+    }
+    return { winner: top.uid, winnerName: top.name };
+  }
+
+  const completer = players.find((p) => p.uid === completerUid);
+  return {
+    winner: completerUid,
+    winnerName: completer?.name || "Jugador",
+  };
+}
+
 export class GameService {
   constructor() {
     this.db = db;
@@ -56,11 +88,17 @@ export class GameService {
     this.roomId = null;
   }
 
-  async createRoom(difficultyId = DEFAULT_DIFFICULTY) {
+  async createRoom(
+    difficultyId = DEFAULT_DIFFICULTY,
+    battleModeId = DEFAULT_BATTLE_MODE,
+    options = {}
+  ) {
     const user = getCurrentUser();
     if (!user) throw new Error("Debes iniciar sesión");
 
     const difficulty = getDifficulty(difficultyId);
+    const battleMode = getBattleMode(battleModeId);
+    const gameOptions = normalizeGameOptions(options);
     const { puzzle, solution } = generateSudoku(difficulty.cellsToRemove);
     const code = generateRoomCode();
 
@@ -71,6 +109,9 @@ export class GameService {
       maxPlayers: MAX_PLAYERS,
       difficulty: difficulty.id,
       difficultyLabel: difficulty.label,
+      battleMode: battleMode.id,
+      battleModeLabel: battleMode.label,
+      options: gameOptions,
       playerUids: [user.uid],
       players: [playerPayload(user)],
       puzzle: flattenGrid(puzzle),
@@ -78,6 +119,7 @@ export class GameService {
       rankingProcessed: [],
       headToHeadRecorded: false,
       boards: flattenBoards({ [user.uid]: emptyPlayerBoard(puzzle) }),
+      lastMoves: {},
       attacks: [],
       winner: null,
       winnerName: null,
@@ -227,38 +269,184 @@ export class GameService {
 
       const wasCorrect =
         value !== 0 && value === solution[row][col] && previous !== value;
+      const wasCleared =
+        value === 0 && previous !== 0 && previous === solution[row][col];
 
-      let winner = data.winner;
-      let winnerName = data.winnerName;
       let players = data.players.map((p) => ({ ...p }));
 
       if (wasCorrect) {
         players = players.map((p) =>
           p.uid === user.uid ? { ...p, solvedCount: (p.solvedCount || 0) + 1 } : p
         );
+      } else if (wasCleared) {
+        players = players.map((p) =>
+          p.uid === user.uid
+            ? { ...p, solvedCount: Math.max(0, (p.solvedCount || 0) - 1) }
+            : p
+        );
       }
 
-      if (isBoardComplete(board, solution, puzzle)) {
-        winner = user.uid;
-        winnerName = user.displayName || user.email?.split("@")[0] || "Jugador";
-      }
+      const lastMoves = { ...(data.lastMoves || {}) };
+      lastMoves[user.uid] = { row, col, previous, value, fromHint: false };
 
       const updates = {
         boards: flattenBoards(boards),
         players,
+        lastMoves,
         attacks: pruneExpiredAttacks(data.attacks),
         updatedAt: FieldValue.serverTimestamp(),
       };
 
-      if (winner) {
-        updates.winner = winner;
-        updates.winnerName = winnerName;
+      if (isBoardComplete(board, solution, puzzle)) {
+        const result = resolveWinner(players, user.uid, data.battleMode || "race");
+        updates.winner = result.winner;
+        updates.winnerName = result.winnerName;
         updates.status = "finished";
         updates.finishedAt = FieldValue.serverTimestamp();
+        updates.finishedBy = user.uid;
       }
 
       tx.update(docRef, updates);
-      return { wasCorrect, winner: winner === user.uid };
+      return {
+        wasCorrect,
+        winner: updates.winner === user.uid,
+        fromHint: false,
+      };
+    });
+  }
+
+  async useHint(roomId, row, col) {
+    const user = getCurrentUser();
+    const docRef = this.db.collection(ROOMS).doc(roomId);
+
+    return this.db.runTransaction(async (tx) => {
+      const doc = await tx.get(docRef);
+      if (!doc.exists) throw new Error("Sala no encontrada");
+
+      const data = parseRoomData(doc.data());
+      if (data.status !== "playing") throw new Error("La partida no está activa");
+      if (data.winner) throw new Error("La partida ya terminó");
+
+      const puzzle = data.puzzle;
+      const solution = data.solution;
+      const boards = { ...data.boards };
+      const board = boards[user.uid].map((r) => [...r]);
+
+      if (puzzle[row][col] !== 0) throw new Error("Celda fija");
+      if (board[row][col] === solution[row][col]) {
+        throw new Error("Esa celda ya está resuelta");
+      }
+
+      const me = data.players.find((p) => p.uid === user.uid);
+      const hintCheck = canUseHint(me);
+      if (!hintCheck.ok) throw new Error(hintCheck.reason);
+
+      const previous = board[row][col];
+      const value = solution[row][col];
+      board[row][col] = value;
+      boards[user.uid] = board;
+
+      const players = data.players.map((p) =>
+        p.uid === user.uid
+          ? {
+              ...p,
+              solvedCount: (p.solvedCount || 0) + (previous === value ? 0 : 1),
+              hintsUsed: (p.hintsUsed || 0) + 1,
+            }
+          : { ...p }
+      );
+
+      const lastMoves = { ...(data.lastMoves || {}) };
+      lastMoves[user.uid] = { row, col, previous, value, fromHint: true };
+
+      const updates = {
+        boards: flattenBoards(boards),
+        players,
+        lastMoves,
+        attacks: pruneExpiredAttacks(data.attacks),
+        updatedAt: FieldValue.serverTimestamp(),
+      };
+
+      if (isBoardComplete(board, solution, puzzle)) {
+        const result = resolveWinner(players, user.uid, data.battleMode || "race");
+        updates.winner = result.winner;
+        updates.winnerName = result.winnerName;
+        updates.status = "finished";
+        updates.finishedAt = FieldValue.serverTimestamp();
+        updates.finishedBy = user.uid;
+      }
+
+      tx.update(docRef, updates);
+      return {
+        value,
+        cost: HINT_COST,
+        hintsUsed: (me?.hintsUsed || 0) + 1,
+        winner: updates.winner === user.uid,
+      };
+    });
+  }
+
+  async undoLastMove(roomId) {
+    const user = getCurrentUser();
+    const docRef = this.db.collection(ROOMS).doc(roomId);
+
+    return this.db.runTransaction(async (tx) => {
+      const doc = await tx.get(docRef);
+      if (!doc.exists) throw new Error("Sala no encontrada");
+
+      const data = parseRoomData(doc.data());
+      if (data.status !== "playing") throw new Error("La partida no está activa");
+      if (data.winner) throw new Error("La partida ya terminó");
+
+      const lastMove = data.lastMoves?.[user.uid];
+      if (!lastMove) throw new Error("No hay movimiento para deshacer");
+
+      const { row, col, previous, value, fromHint } = lastMove;
+      const boards = { ...data.boards };
+      const board = boards[user.uid].map((r) => [...r]);
+
+      if (board[row][col] !== value) {
+        throw new Error("No hay movimiento para deshacer");
+      }
+
+      board[row][col] = previous;
+      boards[user.uid] = board;
+
+      const solution = data.solution;
+      const wasCorrect = value !== 0 && value === solution[row][col] && previous !== value;
+      const wasCleared =
+        value === 0 && previous !== 0 && previous === solution[row][col];
+
+      let players = data.players.map((p) => ({ ...p }));
+      if (wasCorrect) {
+        players = players.map((p) =>
+          p.uid === user.uid
+            ? {
+                ...p,
+                solvedCount: Math.max(0, (p.solvedCount || 0) - 1),
+                hintsUsed: fromHint
+                  ? Math.max(0, (p.hintsUsed || 0) - 1)
+                  : p.hintsUsed || 0,
+              }
+            : p
+        );
+      } else if (wasCleared) {
+        players = players.map((p) =>
+          p.uid === user.uid ? { ...p, solvedCount: (p.solvedCount || 0) + 1 } : p
+        );
+      }
+
+      const lastMoves = { ...(data.lastMoves || {}) };
+      delete lastMoves[user.uid];
+
+      tx.update(docRef, {
+        boards: flattenBoards(boards),
+        players,
+        lastMoves,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+
+      return { row, col, previous };
     });
   }
 
@@ -312,10 +500,13 @@ export class GameService {
     } else {
       const boards = { ...data.boards };
       delete boards[user.uid];
+      const lastMoves = { ...(data.lastMoves || {}) };
+      delete lastMoves[user.uid];
       await docRef.update({
         players,
         playerUids: players.map((p) => p.uid),
         boards: flattenBoards(boards),
+        lastMoves,
         hostId: players[0].uid,
         updatedAt: FieldValue.serverTimestamp(),
       });

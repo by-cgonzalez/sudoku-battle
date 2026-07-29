@@ -10,6 +10,7 @@ import {
 import { GameService } from "../lib/game";
 import { HeadToHeadService } from "../lib/headToHead";
 import { getDifficulty } from "../lib/difficulty";
+import { canUseHint, HINT_COST, normalizeGameOptions } from "../lib/features";
 import { generateSudoku, isBoardComplete } from "../lib/sudoku";
 import { useAuth } from "./AuthContext";
 
@@ -70,7 +71,7 @@ export function GameProvider({ children }) {
     setScreen("lobby");
   }, [gameService, headToHeadService, room]);
 
-  const startSolo = useCallback((difficultyId) => {
+  const startSolo = useCallback((difficultyId, options = {}) => {
     const difficulty = getDifficulty(difficultyId);
     const { puzzle, solution } = generateSudoku(difficulty.cellsToRemove);
     const board = puzzle.map((row) => row.map((cell) => (cell === 0 ? 0 : cell)));
@@ -80,8 +81,14 @@ export function GameProvider({ children }) {
       solution,
       board,
       difficulty: difficulty.id,
+      options: normalizeGameOptions(options),
       startedAt: Date.now(),
       finished: false,
+      hintsUsed: 0,
+      solvedCount: 0,
+      mistakes: 0,
+      lastMove: null,
+      completionRecorded: false,
     });
     setScreen("solo");
   }, []);
@@ -91,21 +98,103 @@ export function GameProvider({ children }) {
     setScreen("lobby");
   }, []);
 
+  const goHome = useCallback(async () => {
+    if (screen === "game") return;
+    if (soloSession) {
+      leaveSolo();
+      return;
+    }
+    if (room) {
+      await leaveRoom();
+      return;
+    }
+    setScreen("lobby");
+  }, [screen, soloSession, room, leaveSolo, leaveRoom]);
+
+  const recordSoloMistake = useCallback(() => {
+    setSoloSession((prev) => {
+      if (!prev || prev.finished) return prev;
+      return { ...prev, mistakes: (prev.mistakes || 0) + 1 };
+    });
+  }, []);
+
+  const markSoloCompletionRecorded = useCallback(() => {
+    setSoloSession((prev) => {
+      if (!prev) return prev;
+      return { ...prev, completionRecorded: true };
+    });
+  }, []);
+
   const updateSoloCell = useCallback((row, col, value) => {
     setSoloSession((prev) => {
       if (!prev || prev.finished) return prev;
 
       const board = prev.board.map((r) => [...r]);
+      const previous = board[row][col];
       board[row][col] = value;
+
+      const wasCorrect =
+        value !== 0 && value === prev.solution[row][col] && previous !== value;
+      const wasCleared =
+        value === 0 && previous !== 0 && previous === prev.solution[row][col];
+
+      let solvedCount = prev.solvedCount || 0;
+      if (wasCorrect) solvedCount += 1;
+      else if (wasCleared) solvedCount = Math.max(0, solvedCount - 1);
+
       const finished = isBoardComplete(board, prev.solution, prev.puzzle);
 
       return {
         ...prev,
         board,
+        solvedCount,
+        lastMove: { row, col, previous, value, fromHint: false },
         finished,
         finishedAt: finished ? Date.now() : prev.finishedAt,
       };
     });
+  }, []);
+
+  const useSoloHint = useCallback((row, col) => {
+    let result = { ok: false, reason: "No se pudo usar el hint" };
+
+    setSoloSession((prev) => {
+      if (!prev || prev.finished) return prev;
+      if (prev.puzzle[row][col] !== 0) return prev;
+
+      const check = canUseHint({
+        solvedCount: prev.solvedCount || 0,
+        hintsUsed: prev.hintsUsed || 0,
+      });
+      if (!check.ok) {
+        result = check;
+        return prev;
+      }
+
+      const board = prev.board.map((r) => [...r]);
+      const previous = board[row][col];
+      const value = prev.solution[row][col];
+      if (previous === value) {
+        result = { ok: false, reason: "Esa celda ya está resuelta" };
+        return prev;
+      }
+
+      board[row][col] = value;
+      const finished = isBoardComplete(board, prev.solution, prev.puzzle);
+      result = { ok: true, value, cost: HINT_COST };
+
+      return {
+        ...prev,
+        board,
+        solvedCount: (prev.solvedCount || 0) + 1,
+        hintsUsed: (prev.hintsUsed || 0) + 1,
+        lastMove: { row, col, previous, value, fromHint: true },
+        finished,
+        finishedAt: finished ? Date.now() : prev.finishedAt,
+      };
+    });
+
+    return result;
   }, []);
 
   useEffect(() => {
@@ -138,9 +227,13 @@ export function GameProvider({ children }) {
         headToHeadService,
         enterRoom,
         leaveRoom,
+        goHome,
         startSolo,
         leaveSolo,
         updateSoloCell,
+        useSoloHint,
+        recordSoloMistake,
+        markSoloCompletionRecorded,
         soloSession,
         getOpponent,
         getMe,

@@ -17,6 +17,10 @@ export function useSudokuKeyboard({
   onSelectCell,
   onInput,
   onClear,
+  onToggleDraft,
+  onHint,
+  notesEnabled = false,
+  hintsEnabled = false,
 }) {
   useEffect(() => {
     if (!enabled) return;
@@ -25,6 +29,18 @@ export function useSudokuKeyboard({
       const tag = e.target?.tagName?.toLowerCase();
       if (tag === "input" || tag === "textarea" || tag === "select") return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+      if (notesEnabled && (e.key === "p" || e.key === "P")) {
+        e.preventDefault();
+        onToggleDraft?.();
+        return;
+      }
+
+      if (hintsEnabled && (e.key === "h" || e.key === "H")) {
+        e.preventDefault();
+        onHint?.();
+        return;
+      }
 
       const digit = parseSudokuDigit(e.key, e.code);
       if (digit !== null) {
@@ -58,5 +74,15 @@ export function useSudokuKeyboard({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [enabled, selectedCell, onSelectCell, onInput, onClear]);
+  }, [
+    enabled,
+    selectedCell,
+    onSelectCell,
+    onInput,
+    onClear,
+    onToggleDraft,
+    onHint,
+    notesEnabled,
+    hintsEnabled,
+  ]);
 }

@@ -1,4 +1,4 @@
-import { getCurrentUser } from "./auth";
+import { getCurrentUser, getUserDisplayName } from "./auth";
 import { getDifficulty } from "./difficulty";
 import { db, firebase } from "./firebase";
 
@@ -9,7 +9,7 @@ const { FieldValue } = firebase.firestore;
 function playerRankingPayload(user) {
   return {
     uid: user.uid,
-    name: user.displayName || user.email?.split("@")[0] || "Jugador",
+    name: getUserDisplayName(user),
     photoURL: user.photoURL || "",
     points: 0,
     wins: 0,
@@ -35,6 +35,22 @@ export class RankingService {
       });
     }
     return ref;
+  }
+
+  async updateDisplayName(name) {
+    const user = getCurrentUser();
+    if (!user) throw new Error("Debes iniciar sesión");
+
+    const trimmed = name.trim();
+    await this.db.collection(RANKINGS).doc(user.uid).set(
+      {
+        uid: user.uid,
+        name: trimmed || user.email?.split("@")[0] || "Jugador",
+        photoURL: user.photoURL || "",
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
   }
 
   async recordMyResult(room) {
@@ -67,7 +83,7 @@ export class RankingService {
         playerRef,
         {
           uid: user.uid,
-          name: user.displayName || base.name || "Jugador",
+          name: getUserDisplayName(user) || base.name || "Jugador",
           photoURL: user.photoURL || base.photoURL || "",
           points: (base.points || 0) + points,
           wins: (base.wins || 0) + (won ? 1 : 0),
