@@ -3,7 +3,14 @@ import { useAuth } from "../contexts/AuthContext";
 import { useGame } from "../contexts/GameContext";
 import { formatWinRate } from "../lib/ranking";
 import { DIFFICULTIES, DEFAULT_DIFFICULTY } from "../lib/difficulty";
+import {
+  BATTLE_MODES,
+  DEFAULT_BATTLE_MODE,
+  DEFAULT_GAME_OPTIONS,
+  normalizeGameOptions,
+} from "../lib/features";
 import { signOut } from "../lib/auth";
+import { OptionsPanel } from "./OptionsPanel";
 
 export function RankingPanel() {
   const { user, rankingService } = useAuth();
@@ -83,13 +90,32 @@ export function RankingPanel() {
 export function LobbyScreen() {
   const { gameService, enterRoom, startSolo } = useGame();
   const [difficulty, setDifficulty] = useState(DEFAULT_DIFFICULTY);
+  const [battleMode, setBattleMode] = useState(DEFAULT_BATTLE_MODE);
+  const [options, setOptions] = useState(() => ({ ...DEFAULT_GAME_OPTIONS }));
   const [status, setStatus] = useState({ message: "", type: "" });
   const [joinCode, setJoinCode] = useState("");
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const inviteCode = params.get("join");
+    if (inviteCode) {
+      setJoinCode(inviteCode.toUpperCase());
+      setStatus({
+        message: `Invitación detectada: ${inviteCode.toUpperCase()}. Pulsa Unirse.`,
+        type: "",
+      });
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, []);
 
   const createRoom = async () => {
     try {
       setStatus({ message: "Creando sala...", type: "" });
-      const { roomId } = await gameService.createRoom(difficulty);
+      const { roomId } = await gameService.createRoom(
+        difficulty,
+        battleMode,
+        normalizeGameOptions(options)
+      );
       enterRoom(roomId);
     } catch (err) {
       setStatus({ message: err.message, type: "error" });
@@ -111,10 +137,15 @@ export function LobbyScreen() {
     <section className="screen active">
       <div className="lobby-layout">
         <div className="lobby-main">
-          <div className="lobby-grid lobby-grid-3">
-            <div className="card">
+          <div className="lobby-hero">
+            <h2>Elige tu batalla</h2>
+            <p>Crea una sala 1v1, únete con un código o practica en solitario.</p>
+          </div>
+
+          <div className="lobby-top">
+            <div className="card lobby-card create-room-card">
               <h2>Crear sala</h2>
-              <p>Crea una partida y comparte el código con tu rival.</p>
+              <p>Configura la partida e invita a tu rival.</p>
 
               <label className="section-label">Dificultad</label>
               <div className="difficulty-options">
@@ -136,27 +167,65 @@ export function LobbyScreen() {
                 ))}
               </div>
 
+              <label className="section-label">Modalidad battle</label>
+              <div className="battle-options">
+                {Object.values(BATTLE_MODES).map((mode) => (
+                  <label key={mode.id} className="battle-option">
+                    <input
+                      type="radio"
+                      name="battleMode"
+                      value={mode.id}
+                      checked={battleMode === mode.id}
+                      onChange={() => setBattleMode(mode.id)}
+                    />
+                    <span className="battle-card">
+                      <span className="battle-icon">{mode.icon}</span>
+                      <span className="battle-name">{mode.label}</span>
+                      <span className="battle-desc">{mode.desc}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+
+              <div className="create-options-wrap">
+                <OptionsPanel
+                  options={options}
+                  onChange={setOptions}
+                  collapsible
+                  defaultOpen={false}
+                  compact
+                />
+                <p className="hint options-hint">
+                  Quien invita define estas opciones para la sala. También aplican en solitario.
+                </p>
+              </div>
+
               <button type="button" className="btn btn-primary btn-large" onClick={createRoom}>
                 Crear sala 1v1
               </button>
             </div>
 
-            <div className="card">
+            <RankingPanel />
+          </div>
+
+          <div className="lobby-grid lobby-grid-2">
+            <div className="card lobby-card">
               <h2>Modo solitario</h2>
-              <p>Practica a tu ritmo sin rival ni ataques.</p>
-              <p className="hint">Usa la misma dificultad seleccionada arriba.</p>
+              <p>Practica con las opciones del panel, sin rival ni ataques.</p>
+              <p className="hint">Usa la dificultad y opciones de Crear sala.</p>
               <button
                 type="button"
                 className="btn btn-secondary btn-large"
-                onClick={() => startSolo(difficulty)}
+                onClick={() => startSolo(difficulty, options)}
               >
                 Jugar solo
               </button>
             </div>
 
-            <div className="card">
+            <div className="card lobby-card">
               <h2>Unirse a sala</h2>
-              <form onSubmit={joinRoom}>
+              <p>Pega el código o abre un enlace de invitación.</p>
+              <form onSubmit={joinRoom} className="join-form">
                 <label>Código de sala</label>
                 <input
                   type="text"
@@ -171,12 +240,12 @@ export function LobbyScreen() {
               </form>
             </div>
           </div>
+
           <p className={`status-message ${status.type}`}>{status.message}</p>
           <button type="button" className="btn btn-ghost" onClick={() => signOut()}>
             Cerrar sesión
           </button>
         </div>
-        <RankingPanel />
       </div>
     </section>
   );

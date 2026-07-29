@@ -1,6 +1,6 @@
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { isFirebaseConfigured } from "../lib/firebase";
-import { onAuthChange } from "../lib/auth";
+import { getCurrentUser, onAuthChange } from "../lib/auth";
 import { RankingService } from "../lib/ranking";
 
 const AuthContext = createContext(null);
@@ -8,8 +8,21 @@ const AuthContext = createContext(null);
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [profileRevision, setProfileRevision] = useState(0);
   const configured = isFirebaseConfigured();
   const rankingService = useMemo(() => (configured ? new RankingService() : null), [configured]);
+
+  const refreshUser = useCallback(async () => {
+    const current = getCurrentUser();
+    if (!current) {
+      setUser(null);
+      return null;
+    }
+    await current.reload();
+    setUser(getCurrentUser());
+    setProfileRevision((n) => n + 1);
+    return getCurrentUser();
+  }, []);
 
   useEffect(() => {
     if (!configured) {
@@ -29,7 +42,9 @@ export function AuthProvider({ children }) {
   }, [configured, rankingService]);
 
   return (
-    <AuthContext.Provider value={{ user, loading, configured, rankingService }}>
+    <AuthContext.Provider
+      value={{ user, loading, configured, rankingService, refreshUser, profileRevision }}
+    >
       {children}
     </AuthContext.Provider>
   );
