@@ -79,7 +79,8 @@ export function playerScore(player) {
   if (!player) return 0;
   const solved = player.solvedCount || 0;
   const hints = player.hintsUsed || 0;
-  return Math.max(0, solved - HINT_COST * hints);
+  const spent = player.pointsSpent || 0;
+  return Math.max(0, solved - HINT_COST * hints - spent);
 }
 
 export function canUseHint(player) {

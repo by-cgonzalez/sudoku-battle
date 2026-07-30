@@ -5,9 +5,15 @@ import { getDifficulty } from "../lib/difficulty";
 import {
   ATTACK_TYPES,
   ATTACK_LABELS,
+  ATTACK_COSTS,
+  DEFENSE_COST,
+  MAX_DEFENSE_BUYS,
+  MAX_ATTACK_USES,
   isInputFrozen,
   getActiveAttacks,
   isCellBlocked,
+  getAttackUses,
+  canUseAttackType,
 } from "../lib/attacks";
 import {
   canUseHint,
@@ -27,36 +33,11 @@ import { SudokuBoard, Numpad, ScorePanel, GameTools, TimerDisplay, BoardSizePick
 import { HeadToHeadPanel } from "./HeadToHeadPanel";
 import { useSudokuKeyboard } from "../hooks/useSudokuKeyboard";
 
-function AttackModal({ onSelect, onClose }) {
-  return (
-    <div className="modal">
-      <div className="modal-content">
-        <h3>¡Acierto! Elige tu ataque</h3>
-        <p className="subtitle">Impacta a tu oponente antes de que te alcance</p>
-        <div className="attack-options">
-          {Object.entries(ATTACK_LABELS).map(([type, info]) => (
-            <button key={type} type="button" className="attack-btn" onClick={() => onSelect(type)}>
-              <span className="attack-icon">{info.icon}</span>
-              <span className="attack-title">{info.title}</span>
-              <span className="attack-desc">{info.desc}</span>
-            </button>
-          ))}
-        </div>
-        <button type="button" className="btn btn-ghost" onClick={onClose}>Saltar ataque</button>
-      </div>
-    </div>
-  );
-}
-
 export function GameScreen() {
   const { user } = useAuth();
   const { room, rivalry, gameService, leaveRoom, getOpponent, getMe } = useGame();
 
   const [selectedCell, setSelectedCell] = useState(null);
-  const [attackModal, setAttackModal] = useState(false);
-  const [pendingAttack, setPendingAttack] = useState(null);
-  const [attackTargetMode, setAttackTargetMode] = useState(null);
-  const [attackHint, setAttackHint] = useState("");
   const [status, setStatus] = useState({ message: "", type: "" });
   const [wrongCell, setWrongCell] = useState(null);
   const [tick, setTick] = useState(0);
@@ -64,6 +45,7 @@ export function GameScreen() {
   const [notes, setNotes] = useState({});
   const [elapsed, setElapsed] = useState(0);
   const [boardSize, setBoardSize] = useState(DEFAULT_BOARD_SIZE);
+  const [shopBusy, setShopBusy] = useState(false);
 
   const options = normalizeGameOptions(room?.options);
   const me = room && user ? getMe(room) : null;
@@ -76,6 +58,7 @@ export function GameScreen() {
   const battle = getBattleMode(room?.battleMode);
   const finished = room?.status === "finished";
   const won = room?.winner === user?.uid;
+  const myScore = playerScore(me);
 
   const conflictCells = useMemo(() => {
     if (!options.conflicts || !myBoard || !room?.puzzle) return null;
@@ -96,10 +79,13 @@ export function GameScreen() {
       setStatus({ message: "", type: "" });
       const result = await gameService.placeNumber(room.id, row, col, value);
       setNotes((prev) => clearCellNotes(prev, row, col));
-      if (result.wasCorrect && value !== 0) {
-        setAttackModal(true);
-        setPendingAttack(null);
-        setAttackTargetMode(null);
+      if (result.wasCorrect && result.autoAttack) {
+        setStatus({
+          message: result.autoAttackAbsorbed
+            ? `${result.autoAttack.label} bloqueado por la defensa rival`
+            : `Ataque auto: ${result.autoAttack.label}`,
+          type: "",
+        });
       }
     } catch (err) {
       setStatus({ message: err.message, type: "error" });
@@ -135,8 +121,42 @@ export function GameScreen() {
     }
   }, [options.hints, selectedCell, room, user, frozen, finished, me, gameService]);
 
+  const handleBuyDefense = useCallback(async () => {
+    if (!room || finished || shopBusy) return;
+    try {
+      setShopBusy(true);
+      const result = await gameService.buyDefense(room.id);
+      setStatus({
+        message: `Defensa comprada (−${result.cost} pts). Escudos: ${result.defenseCharges}`,
+        type: "",
+      });
+    } catch (err) {
+      setStatus({ message: err.message, type: "error" });
+    } finally {
+      setShopBusy(false);
+    }
+  }, [room, finished, shopBusy, gameService]);
+
+  const handleBuyAttack = useCallback(async (type) => {
+    if (!room || finished || shopBusy) return;
+    try {
+      setShopBusy(true);
+      const result = await gameService.buyAttack(room.id, type);
+      setStatus({
+        message: result.absorbed
+          ? `${result.label} comprado (−${result.cost} pts) pero bloqueado por defensa`
+          : `${result.label} lanzado (−${result.cost} pts)`,
+        type: "",
+      });
+    } catch (err) {
+      setStatus({ message: err.message, type: "error" });
+    } finally {
+      setShopBusy(false);
+    }
+  }, [room, finished, shopBusy, gameService]);
+
   useSudokuKeyboard({
-    enabled: Boolean(room && user && !finished && !frozen && !attackModal && !attackTargetMode),
+    enabled: Boolean(room && user && !finished && !frozen),
     selectedCell,
     onSelectCell: handleSelectCell,
     onInput: handleNumberInput,
@@ -165,50 +185,8 @@ export function GameScreen() {
   if (!room || !user) return null;
 
   const handleCellClick = (row, col, fixed, blocked) => {
-    if (attackTargetMode && pendingAttack) {
-      handleAttackTarget(row, col);
-      return;
-    }
     if (fixed || blocked) return;
     setSelectedCell({ row, col });
-  };
-
-  const selectAttack = (type) => {
-    setPendingAttack(type);
-    if (type === ATTACK_TYPES.FREEZE_INPUT) {
-      executeAttack(type);
-      return;
-    }
-    setAttackTargetMode(type);
-    const hints = {
-      [ATTACK_TYPES.BLOCK_LINE]: "Toca una celda de la fila que quieres bloquear",
-      [ATTACK_TYPES.BLOCK_CELL]: "Toca la celda que quieres bloquear",
-    };
-    setAttackHint(hints[type] || "");
-    setAttackModal(false);
-  };
-
-  const executeAttack = async (type, targetRow = null, targetCol = null) => {
-    try {
-      await gameService.launchAttack(room.id, type, targetRow, targetCol);
-    } catch (err) {
-      setStatus({ message: err.message, type: "error" });
-    }
-    resetAttack();
-  };
-
-  const handleAttackTarget = (row, col) => {
-    if (!pendingAttack || !attackTargetMode) return;
-    const targetRow = row;
-    const targetCol = attackTargetMode === ATTACK_TYPES.BLOCK_LINE ? null : col;
-    executeAttack(pendingAttack, targetRow, targetCol);
-  };
-
-  const resetAttack = () => {
-    setAttackModal(false);
-    setPendingAttack(null);
-    setAttackTargetMode(null);
-    setAttackHint("");
   };
 
   void tick;
@@ -217,6 +195,11 @@ export function GameScreen() {
   const oppFinal = playerScore(opponent);
   const hintCheck = canUseHint(me);
   const canHintNow = Boolean(selectedCell) && hintCheck.ok;
+  const canBuyDefense =
+    !finished &&
+    (me?.defensesBought || 0) < MAX_DEFENSE_BUYS &&
+    myScore >= DEFENSE_COST;
+
   const shortcuts = [
     "1-9",
     "0/Supr borrar",
@@ -245,13 +228,53 @@ export function GameScreen() {
           )}
 
           <div className="attack-info card-small">
-            <h3>⚔️ Ataques</h3>
-            <p>Cada acierto (sin hint) te da un ataque:</p>
+            <h3>⚔️ Combate</h3>
+            <p>Cada acierto lanza un ataque al azar (máx. {MAX_ATTACK_USES} por tipo).</p>
             <ul>
-              <li><strong>Congelar</strong> — 3 seg sin escribir</li>
+              <li><strong>Congelar</strong> — 4 seg</li>
               <li><strong>Bloquear línea</strong> — 10 seg</li>
               <li><strong>Bloquear celda</strong> — 10 seg</li>
             </ul>
+            <p className="shop-meta">
+              Escudos: {me?.defenseCharges || 0} · Usos: ❄️{getAttackUses(me, ATTACK_TYPES.FREEZE_INPUT)}/{MAX_ATTACK_USES}
+              {" · "}➖{getAttackUses(me, ATTACK_TYPES.BLOCK_LINE)}/{MAX_ATTACK_USES}
+              {" · "}🚫{getAttackUses(me, ATTACK_TYPES.BLOCK_CELL)}/{MAX_ATTACK_USES}
+            </p>
+          </div>
+
+          <div className="attack-shop card-small">
+            <h3>🛒 Tienda</h3>
+            <button
+              type="button"
+              className="shop-btn"
+              disabled={!canBuyDefense || shopBusy}
+              onClick={handleBuyDefense}
+              title={`Defensa (−${DEFENSE_COST} pts)`}
+            >
+              🛡️ Defensa −{DEFENSE_COST} · {me?.defensesBought || 0}/{MAX_DEFENSE_BUYS}
+            </button>
+            {Object.values(ATTACK_TYPES).map((type) => {
+              const info = ATTACK_LABELS[type];
+              const cost = ATTACK_COSTS[type];
+              const uses = getAttackUses(me, type);
+              const canBuy =
+                !finished &&
+                canUseAttackType(me, type) &&
+                myScore >= cost &&
+                !shopBusy;
+              return (
+                <button
+                  key={type}
+                  type="button"
+                  className="shop-btn"
+                  disabled={!canBuy}
+                  onClick={() => handleBuyAttack(type)}
+                  title={`${info.title} (−${cost} pts)`}
+                >
+                  {info.icon} {info.title} −{cost} · {uses}/{MAX_ATTACK_USES}
+                </button>
+              );
+            })}
           </div>
 
           {options.hints && (
@@ -278,7 +301,6 @@ export function GameScreen() {
             </div>
           )}
 
-          {attackHint && <p className="attack-hint">{attackHint}</p>}
           <p className={`status-message ${status.type}`}>{status.message}</p>
           <button type="button" className="btn btn-ghost" onClick={leaveRoom}>
             Abandonar
@@ -332,10 +354,6 @@ export function GameScreen() {
           <p className="keyboard-hint">{shortcuts}</p>
         </main>
       </div>
-
-      {attackModal && (
-        <AttackModal onSelect={selectAttack} onClose={resetAttack} />
-      )}
 
       {finished && (
         <div className="game-overlay">
