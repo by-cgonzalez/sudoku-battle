@@ -18,7 +18,15 @@ import {
   getDifficultyCompletions,
   recordSoloCompletion,
 } from "../lib/soloStats";
-import { SudokuBoard, Numpad, GameTools, TimerDisplay, BoardSizePicker } from "./GameUI";
+import {
+  SudokuBoard,
+  Numpad,
+  GameTools,
+  TimerDisplay,
+  BoardSizePicker,
+  MatchHud,
+  getCompletedDigits,
+} from "./GameUI";
 import { useSudokuKeyboard } from "../hooks/useSudokuKeyboard";
 
 export function SoloScreen() {
@@ -38,6 +46,7 @@ export function SoloScreen() {
   const [notes, setNotes] = useState({});
   const [boardSize, setBoardSize] = useState(DEFAULT_BOARD_SIZE);
   const [completions, setCompletions] = useState(0);
+  const [extrasOpen, setExtrasOpen] = useState(false);
 
   const finished = soloSession?.finished ?? false;
   const puzzle = soloSession?.puzzle;
@@ -63,18 +72,21 @@ export function SoloScreen() {
     return getConflictCells(board, puzzle);
   }, [options.conflicts, board, puzzle]);
 
-  const handleNumberInput = useCallback((value) => {
-    if (!selectedCell || !soloSession || soloSession.finished) return;
-    const { row, col } = selectedCell;
+  const handleNumberInput = useCallback((value, cellOverride = null) => {
+    const cell = cellOverride || selectedCell;
+    if (!cell || !soloSession || soloSession.finished) return;
+    const { row, col } = cell;
     if (soloSession.puzzle[row][col] !== 0) return;
 
     if (options.notes && draftMode) {
       if (soloSession.board[row][col]) return;
+      setSelectedCell(cell);
       setNotes((prev) => toggleNoteValue(prev, row, col, value));
       return;
     }
 
     if (value !== 0 && value !== soloSession.solution[row][col]) {
+      setSelectedCell(cell);
       recordSoloMistake();
       setStatus({ message: "Número incorrecto", type: "error" });
       setWrongCell({ row, col });
@@ -82,14 +94,21 @@ export function SoloScreen() {
       return;
     }
 
+    setSelectedCell(cell);
     setStatus({ message: "", type: "" });
     setNotes((prev) => clearCellNotes(prev, row, col));
     updateSoloCell(row, col, value);
   }, [selectedCell, soloSession, options.notes, draftMode, updateSoloCell, recordSoloMistake]);
 
+  const handleJoystickInput = useCallback(
+    (row, col, value) => {
+      handleNumberInput(value, { row, col });
+    },
+    [handleNumberInput]
+  );
+
   const handleSelectCell = useCallback((row, col) => {
     if (!soloSession || soloSession.finished) return;
-    if (soloSession.puzzle[row][col] !== 0) return;
     setSelectedCell({ row, col });
   }, [soloSession]);
 
@@ -133,9 +152,10 @@ export function SoloScreen() {
 
   useEffect(() => {
     if (!options.timer || !soloSession || soloSession.finished) return;
-    const id = setInterval(() => {
-      setElapsed(Math.floor((Date.now() - soloSession.startedAt) / 1000));
-    }, 1000);
+    const sync = () =>
+      setElapsed(Math.max(0, Math.floor((Date.now() - soloSession.startedAt) / 1000)));
+    sync();
+    const id = setInterval(sync, 1000);
     return () => clearInterval(id);
   }, [options.timer, soloSession]);
 
@@ -153,10 +173,15 @@ export function SoloScreen() {
   const canHintNow = Boolean(selectedCell) && hintCheck.ok;
   const mistakes = soloSession.mistakes || 0;
 
-  const handleCellClick = (row, col, fixed) => {
-    if (fixed || finished) return;
+  const handleCellClick = (row, col, _fixed) => {
+    if (finished) return;
     setSelectedCell({ row, col });
   };
+
+  const completedDigits = useMemo(
+    () => getCompletedDigits(board, puzzle),
+    [board, puzzle]
+  );
 
   const shortcuts = [
     "1-9",
@@ -168,39 +193,43 @@ export function SoloScreen() {
     .filter(Boolean)
     .join(" · ");
 
+  const soloStats = (
+    <div className="solo-stats card-small">
+      <h3>🧩 Modo solitario</h3>
+      <div className="solo-stat-row">
+        <span>Progreso</span>
+        <strong>{solved} / {totalEmpty}</strong>
+      </div>
+      <div className="solo-stat-row">
+        <span>Puntos</span>
+        <strong>{score}</strong>
+      </div>
+      <div className="solo-stat-row">
+        <span>Fallos</span>
+        <strong className={mistakes > 0 ? "stat-warn" : ""}>{mistakes}</strong>
+      </div>
+      <div className="solo-stat-row">
+        <span>Veces {diff.label}</span>
+        <strong>{completions}</strong>
+      </div>
+      {options.hints && (
+        <div className="solo-stat-row">
+          <span>Hints</span>
+          <strong>{soloSession.hintsUsed || 0}/{MAX_HINTS}</strong>
+        </div>
+      )}
+    </div>
+  );
+
   return (
-    <section className="screen active">
+    <section className="screen active game-screen solo-screen">
       <div className="game-layout">
-        <aside className="game-sidebar">
+        <aside className="game-sidebar desktop-sidebar">
           <div className="difficulty-badge-game">{diff.icon} {diff.label}</div>
 
           {options.timer && <TimerDisplay seconds={elapsed} />}
 
-          <div className="solo-stats card-small">
-            <h3>🧩 Modo solitario</h3>
-            <div className="solo-stat-row">
-              <span>Progreso</span>
-              <strong>{solved} / {totalEmpty}</strong>
-            </div>
-            <div className="solo-stat-row">
-              <span>Puntos</span>
-              <strong>{score}</strong>
-            </div>
-            <div className="solo-stat-row">
-              <span>Fallos</span>
-              <strong className={mistakes > 0 ? "stat-warn" : ""}>{mistakes}</strong>
-            </div>
-            <div className="solo-stat-row">
-              <span>Veces {diff.label}</span>
-              <strong>{completions}</strong>
-            </div>
-            {options.hints && (
-              <div className="solo-stat-row">
-                <span>Hints</span>
-                <strong>{soloSession.hintsUsed || 0}/{MAX_HINTS}</strong>
-              </div>
-            )}
-          </div>
+          {soloStats}
 
           {options.hints && !hintCheck.ok && (
             <p className="hint-limit-note">{hintCheck.reason}</p>
@@ -213,6 +242,21 @@ export function SoloScreen() {
         </aside>
 
         <main className="game-board-area">
+          <MatchHud
+            variant="solo"
+            showTimer={options.timer}
+            elapsed={elapsed}
+            myProgress={solved}
+            totalEmpty={totalEmpty}
+            mistakes={mistakes}
+            myScore={score}
+            progressLabel="Avance"
+            difficultyLabel={`${diff.icon} ${diff.label}`}
+            hintsUsed={options.hints ? soloSession.hintsUsed || 0 : null}
+            maxHints={MAX_HINTS}
+            showProgressBar
+          />
+
           <div className="board-toolbar">
             <BoardSizePicker value={boardSize} onChange={setBoardSize} />
             <GameTools
@@ -238,6 +282,9 @@ export function SoloScreen() {
               playerId="solo"
               selectedCell={selectedCell}
               onCellClick={handleCellClick}
+              onJoystickInput={handleJoystickInput}
+              joystickEnabled={!finished}
+              draftMode={options.notes && draftMode}
               wrongCell={wrongCell}
               notes={options.notes ? notes : {}}
               conflictCells={conflictCells}
@@ -250,8 +297,33 @@ export function SoloScreen() {
             onInput={handleNumberInput}
             onClear={() => handleNumberInput(0)}
             boardSize={boardSize}
+            completedDigits={completedDigits}
           />
-          <p className="keyboard-hint">{shortcuts}</p>
+          <p className="keyboard-hint desktop-hint">{shortcuts}</p>
+
+          <p className={`status-message mobile-status ${status.type}`}>{status.message}</p>
+
+          <div className="mobile-extras">
+            <button
+              type="button"
+              className="mobile-extras-toggle"
+              onClick={() => setExtrasOpen((v) => !v)}
+              aria-expanded={extrasOpen}
+            >
+              {extrasOpen ? "▾" : "▸"} Más stats · {completions} en {diff.label}
+            </button>
+            {extrasOpen && (
+              <div className="mobile-extras-body">
+                {soloStats}
+                {options.hints && !hintCheck.ok && (
+                  <p className="hint-limit-note">{hintCheck.reason}</p>
+                )}
+              </div>
+            )}
+            <button type="button" className="btn btn-ghost mobile-leave" onClick={leaveSolo}>
+              Volver al lobby
+            </button>
+          </div>
         </main>
       </div>
 

@@ -10,7 +10,8 @@ import {
 import { GameService } from "../lib/game";
 import { HeadToHeadService } from "../lib/headToHead";
 import { getDifficulty } from "../lib/difficulty";
-import { canUseHint, HINT_COST, normalizeGameOptions } from "../lib/features";
+import { canUseHint, HINT_COST, normalizeGameOptions, playerScore } from "../lib/features";
+import { recordVersusMatch } from "../lib/matchHistory";
 import { generateSudoku, isBoardComplete } from "../lib/sudoku";
 import { useAuth } from "./AuthContext";
 
@@ -203,7 +204,26 @@ export function GameProvider({ children }) {
     statsRecorded.current = true;
     rankingService?.recordMyResult(room);
     headToHeadService.recordMatch(room);
-  }, [room, user, rankingService, headToHeadService]);
+
+    const me = getMe(room);
+    const opponent = getOpponent(room);
+    const won = room.winner === user.uid;
+    const diff = getDifficulty(room.difficulty);
+    recordVersusMatch(user.uid, {
+      roomId: room.id,
+      finishedAt: Date.now(),
+      won,
+      opponentName: opponent?.name || room.winnerName || "Rival",
+      opponentUid: opponent?.uid || "",
+      difficulty: room.difficulty,
+      battleMode: room.battleMode || "race",
+      mySolved: me?.solvedCount || 0,
+      oppSolved: opponent?.solvedCount || 0,
+      myScore: playerScore(me),
+      oppScore: playerScore(opponent),
+      pointsEarned: won ? diff.winPoints : 5,
+    });
+  }, [room, user, rankingService, headToHeadService, getMe, getOpponent]);
 
   useEffect(() => {
     if (!user && screen !== "lobby") {

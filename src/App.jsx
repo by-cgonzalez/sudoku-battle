@@ -37,15 +37,26 @@ function AppContent() {
   }
 }
 
+function AppShell() {
+  const { screen } = useGame();
+  const playing = screen === "game" || screen === "solo";
+
+  return (
+    <>
+      <div className="bg-grid" />
+      <div className={`app${playing ? " app-playing" : ""}`}>
+        <Header />
+        <AppContent />
+      </div>
+    </>
+  );
+}
+
 export default function App() {
   return (
     <AuthProvider>
       <GameProvider>
-        <div className="bg-grid" />
-        <div className="app">
-          <Header />
-          <AppContent />
-        </div>
+        <AppShell />
       </GameProvider>
     </AuthProvider>
   );

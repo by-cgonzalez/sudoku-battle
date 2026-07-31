@@ -22,7 +22,7 @@ export const BATTLE_MODES = {
     id: "score",
     label: "Por puntos",
     icon: "🎯",
-    desc: "Gana quien tenga más puntos al terminar",
+    desc: "Ambos completan el sudoku; gana quien tenga más puntos",
   },
 };
 

@@ -1,5 +1,5 @@
 import { SIZE } from "../lib/sudoku";
-import { isCellBlocked } from "../lib/attacks";
+import { ATTACK_LABELS, isCellBlocked } from "../lib/attacks";
 import {
   BOARD_SIZES,
   DEFAULT_BOARD_SIZE,
@@ -10,9 +10,33 @@ import {
   notesKey,
   playerScore,
 } from "../lib/features";
+import { DigitsJoystick } from "./DigitsJoystick";
+import { useCellJoystick } from "../hooks/useCellJoystick";
 
 function sameBox(r1, c1, r2, c2) {
   return Math.floor(r1 / 3) === Math.floor(r2 / 3) && Math.floor(c1 / 3) === Math.floor(c2 / 3);
+}
+
+function cellValueAt(board, puzzle, row, col) {
+  if (!puzzle || !board) return 0;
+  return puzzle[row][col] !== 0 ? puzzle[row][col] : board[row][col] || 0;
+}
+
+/** Digits 1–9 that already appear 9 times on the board. */
+export function getCompletedDigits(board, puzzle) {
+  const counts = Array(10).fill(0);
+  if (!board || !puzzle) return new Set();
+  for (let r = 0; r < SIZE; r++) {
+    for (let c = 0; c < SIZE; c++) {
+      const v = cellValueAt(board, puzzle, r, c);
+      if (v >= 1 && v <= 9) counts[v] += 1;
+    }
+  }
+  const done = new Set();
+  for (let n = 1; n <= 9; n++) {
+    if (counts[n] >= 9) done.add(n);
+  }
+  return done;
 }
 
 export function SudokuBoard({
@@ -22,6 +46,9 @@ export function SudokuBoard({
   playerId,
   selectedCell,
   onCellClick,
+  onJoystickInput,
+  joystickEnabled = true,
+  draftMode = false,
   wrongCell,
   notes = {},
   highlight = true,
@@ -29,96 +56,132 @@ export function SudokuBoard({
   boardSize = DEFAULT_BOARD_SIZE,
 }) {
   const sizePx = getBoardSize(boardSize).px;
-  const selectedValue =
-    selectedCell && board
-      ? puzzle[selectedCell.row][selectedCell.col] !== 0
-        ? puzzle[selectedCell.row][selectedCell.col]
-        : board[selectedCell.row][selectedCell.col]
-      : 0;
+  const selectedValue = selectedCell
+    ? cellValueAt(board, puzzle, selectedCell.row, selectedCell.col)
+    : 0;
+  const completedDigits = getCompletedDigits(board, puzzle);
+
+  const { joystick, bindCell, wrapClick } = useCellJoystick({
+    enabled: Boolean(joystickEnabled && onJoystickInput),
+    onSelectCell: (r, c, fixed, blocked) => onCellClick?.(r, c, fixed, blocked),
+    onCommitDigit: onJoystickInput,
+    completedDigits,
+    draftMode,
+  });
 
   return (
-    <div
-      className={`sudoku-grid board-size-${boardSize}`}
-      style={{ width: sizePx, maxWidth: "100%" }}
-    >
-      {Array.from({ length: SIZE }, (_, r) =>
-        Array.from({ length: SIZE }, (_, c) => {
-          const fixed = puzzle[r][c] !== 0;
-          const value = fixed ? puzzle[r][c] : board[r][c];
-          const blocked = !fixed && isCellBlocked(attacks, playerId, r, c);
-          const selected = selectedCell?.row === r && selectedCell?.col === c;
-          const wrong = wrongCell?.row === r && wrongCell?.col === c;
-          const inConflict = conflictCells?.has(notesKey(r, c));
-          const cellNotes = !value ? notes[notesKey(r, c)] || [] : [];
-          const related =
-            highlight &&
-            selectedCell &&
-            !selected &&
-            (selectedCell.row === r ||
-              selectedCell.col === c ||
-              sameBox(selectedCell.row, selectedCell.col, r, c));
-          const sameNumber =
-            highlight && selectedValue > 0 && value === selectedValue && !selected;
+    <>
+      <div
+        className={`sudoku-grid board-size-${boardSize}${joystick ? " joystick-active" : ""}`}
+        style={{ width: sizePx, maxWidth: "100%" }}
+      >
+        {Array.from({ length: SIZE }, (_, r) =>
+          Array.from({ length: SIZE }, (_, c) => {
+            const fixed = puzzle[r][c] !== 0;
+            const value = cellValueAt(board, puzzle, r, c);
+            const blocked = !fixed && isCellBlocked(attacks, playerId, r, c);
+            const selected = selectedCell?.row === r && selectedCell?.col === c;
+            const wrong = wrongCell?.row === r && wrongCell?.col === c;
+            const inConflict = conflictCells?.has(notesKey(r, c));
+            const cellNotes = !value ? notes[notesKey(r, c)] || [] : [];
+            const related =
+              highlight &&
+              selectedCell &&
+              !selected &&
+              selectedValue === 0 &&
+              (selectedCell.row === r ||
+                selectedCell.col === c ||
+                sameBox(selectedCell.row, selectedCell.col, r, c));
+            const sameNumber =
+              highlight && selectedValue > 0 && value === selectedValue;
+            const digitComplete = value > 0 && completedDigits.has(value);
+            const editable = !fixed && !blocked;
 
-          const classes = [
-            "sudoku-cell",
-            fixed && "fixed",
-            blocked && "blocked",
-            selected && "selected",
-            wrong && "wrong",
-            inConflict && "conflict",
-            related && "related",
-            sameNumber && "same-number",
-            cellNotes.length > 0 && "has-notes",
-            (r + 1) % 3 === 0 && r < 8 && "border-bottom-thick",
-            (c + 1) % 3 === 0 && c < 8 && "border-right-thick",
-          ]
-            .filter(Boolean)
-            .join(" ");
+            const classes = [
+              "sudoku-cell",
+              fixed && "fixed",
+              blocked && "blocked",
+              selected && "selected",
+              wrong && "wrong",
+              inConflict && "conflict",
+              related && "related",
+              sameNumber && "same-number",
+              digitComplete && "digit-complete",
+              cellNotes.length > 0 && "has-notes",
+              (r + 1) % 3 === 0 && r < 8 && "border-bottom-thick",
+              (c + 1) % 3 === 0 && c < 8 && "border-right-thick",
+            ]
+              .filter(Boolean)
+              .join(" ");
 
-          return (
-            <button
-              key={`${r}-${c}`}
-              type="button"
-              className={classes}
-              disabled={fixed || blocked}
-              onClick={() => onCellClick(r, c, fixed, blocked)}
-            >
-              {value ? (
-                <span className="cell-value">{value}</span>
-              ) : cellNotes.length > 0 ? (
-                <span className="cell-notes">
-                  {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => (
-                    <span key={n} className={cellNotes.includes(n) ? "on" : ""}>
-                      {cellNotes.includes(n) ? n : ""}
-                    </span>
-                  ))}
-                </span>
-              ) : null}
-            </button>
-          );
-        })
+            const touch = bindCell(r, c, { fixed, blocked, editable });
+
+            return (
+              <button
+                key={`${r}-${c}`}
+                type="button"
+                className={classes}
+                disabled={blocked}
+                onClick={wrapClick(() => onCellClick(r, c, fixed, blocked))}
+                {...touch}
+              >
+                {value ? (
+                  <span className="cell-value">{value}</span>
+                ) : cellNotes.length > 0 ? (
+                  <span className="cell-notes">
+                    {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => (
+                      <span key={n} className={cellNotes.includes(n) ? "on" : ""}>
+                        {cellNotes.includes(n) ? n : ""}
+                      </span>
+                    ))}
+                  </span>
+                ) : null}
+              </button>
+            );
+          })
+        )}
+      </div>
+      {joystick && (
+        <DigitsJoystick
+          x={joystick.x}
+          y={joystick.y}
+          activeDigit={joystick.digit}
+          completedDigits={joystick.completedDigits}
+          draftMode={joystick.draftMode}
+        />
       )}
-    </div>
+    </>
   );
 }
 
-export function Numpad({ frozen, onInput, onClear, draftMode = false, boardSize = DEFAULT_BOARD_SIZE }) {
+export function Numpad({
+  frozen,
+  onInput,
+  onClear,
+  draftMode = false,
+  boardSize = DEFAULT_BOARD_SIZE,
+  completedDigits = null,
+}) {
   const sizePx = getBoardSize(boardSize).px;
+  const done = completedDigits instanceof Set ? completedDigits : new Set();
   return (
     <div className="numpad-area" style={{ width: sizePx, maxWidth: "100%" }}>
       <div className="numpad">
-        {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => (
-          <button
-            key={n}
-            type="button"
-            className={`numpad-btn ${draftMode ? "draft-active" : ""}`}
-            disabled={frozen}
-            onClick={() => onInput(n)}
-          >
-            {n}
-          </button>
-        ))}
+        {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => {
+          const complete = done.has(n);
+          return (
+            <button
+              key={n}
+              type="button"
+              className={`numpad-btn ${draftMode ? "draft-active" : ""} ${complete ? "digit-complete" : ""}`}
+              disabled={frozen || complete}
+              onClick={() => onInput(n)}
+              title={complete ? `${n} completado` : undefined}
+            >
+              {n}
+            </button>
+          );
+        })}
       </div>
       <button type="button" className="btn btn-secondary" disabled={frozen} onClick={onClear}>
         Borrar
@@ -208,6 +271,104 @@ export function TimerDisplay({ seconds, label = "Tiempo" }) {
   );
 }
 
+function formatHudTime(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+/** Compact sticky HUD for mobile (and optional desktop strip). */
+export function MatchHud({
+  showTimer = true,
+  elapsed = 0,
+  myProgress = 0,
+  oppProgress = null,
+  totalEmpty = 0,
+  mistakes = 0,
+  myScore = null,
+  activeAttacks = [],
+  defenseCharges = 0,
+  opponentName = "Rival",
+  variant = "versus",
+  progressLabel = "Tú",
+  difficultyLabel = null,
+  hintsUsed = null,
+  maxHints = MAX_HINTS,
+  showProgressBar = false,
+}) {
+  const pct =
+    totalEmpty > 0 ? Math.min(100, Math.round((myProgress / totalEmpty) * 100)) : 0;
+
+  return (
+    <div className={`match-hud match-hud-${variant}`}>
+      <div className="match-hud-row">
+        {difficultyLabel && (
+          <div className="match-hud-chip">
+            <span className="match-hud-k">Nivel</span>
+            <strong>{difficultyLabel}</strong>
+          </div>
+        )}
+        {showTimer && (
+          <div className="match-hud-chip">
+            <span className="match-hud-k">⏱️</span>
+            <strong>{formatHudTime(elapsed)}</strong>
+          </div>
+        )}
+        <div className="match-hud-chip">
+          <span className="match-hud-k">{progressLabel}</span>
+          <strong>
+            {myProgress}/{totalEmpty}
+            {myScore != null ? ` · ${myScore}pts` : ""}
+          </strong>
+        </div>
+        {oppProgress != null && (
+          <div className="match-hud-chip rival">
+            <span className="match-hud-k">{opponentName}</span>
+            <strong>{oppProgress}/{totalEmpty}</strong>
+          </div>
+        )}
+        <div className={`match-hud-chip ${mistakes > 0 ? "warn" : ""}`}>
+          <span className="match-hud-k">Fallos</span>
+          <strong>{mistakes}</strong>
+        </div>
+        {hintsUsed != null && (
+          <div className="match-hud-chip">
+            <span className="match-hud-k">💡</span>
+            <strong>
+              {hintsUsed}/{maxHints}
+            </strong>
+          </div>
+        )}
+        {defenseCharges > 0 && (
+          <div className="match-hud-chip shield">
+            <span className="match-hud-k">🛡️</span>
+            <strong>{defenseCharges}</strong>
+          </div>
+        )}
+      </div>
+      {showProgressBar && (
+        <div className="match-hud-bar" aria-hidden="true">
+          <div className="match-hud-bar-fill" style={{ width: `${pct}%` }} />
+        </div>
+      )}
+      {activeAttacks.length > 0 && (
+        <div className="match-hud-attacks">
+          {activeAttacks.map((a) => {
+            const remaining = Math.max(0, Math.ceil((a.expiresAt - Date.now()) / 1000));
+            const label = ATTACK_LABELS[a.type]?.title || a.type;
+            const icon = ATTACK_LABELS[a.type]?.icon || "⚡";
+            return (
+              <span key={a.id} className="match-hud-attack">
+                {icon} {label} {remaining}s
+              </span>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ScorePanel({ me, opponent, battleMode = "race" }) {
   const mode = getBattleMode(battleMode);
   const myScore = playerScore(me);
@@ -222,8 +383,8 @@ export function ScorePanel({ me, opponent, battleMode = "race" }) {
       <div className="mode-chip" title={mode.desc}>
         {mode.icon} {mode.label}
       </div>
-      <div className={`score-box me ${iLead ? "leading" : ""}`}>
-        <span className="score-label">Tú</span>
+      <div className={`score-box me ${iLead ? "leading" : ""} ${me?.boardCompleted ? "done" : ""}`}>
+        <span className="score-label">Tú{me?.boardCompleted ? " ✓" : ""}</span>
         <div className="score-value-wrap">
           {iLead && <span className="score-crown" title="Vas ganando">👑</span>}
           <span className="score-value">{battleMode === "score" ? myScore : mySolved}</span>
@@ -235,8 +396,11 @@ export function ScorePanel({ me, opponent, battleMode = "race" }) {
         </span>
       </div>
       <div className="vs-badge">VS</div>
-      <div className={`score-box opponent ${oppLeads ? "leading" : ""}`}>
-        <span className="score-label">{opponent?.name || "Rival"}</span>
+      <div className={`score-box opponent ${oppLeads ? "leading" : ""} ${opponent?.boardCompleted ? "done" : ""}`}>
+        <span className="score-label">
+          {opponent?.name || "Rival"}
+          {opponent?.boardCompleted ? " ✓" : ""}
+        </span>
         <div className="score-value-wrap">
           {oppLeads && <span className="score-crown" title="Va ganando">👑</span>}
           <span className="score-value">{battleMode === "score" ? oppScore : oppSolved}</span>
