@@ -62,19 +62,37 @@ function parseRoomData(data) {
   };
 }
 
+function markPlayerBoardCompleted(players, uid) {
+  return players.map((p) =>
+    p.uid === uid
+      ? {
+          ...p,
+          boardCompleted: true,
+          completedAt: p.completedAt || Date.now(),
+        }
+      : p
+  );
+}
+
+function allPlayersBoardCompleted(players) {
+  return (
+    Array.isArray(players) &&
+    players.length >= 2 &&
+    players.every((p) => p.boardCompleted)
+  );
+}
+
 function resolveWinner(players, completerUid, battleMode) {
   if (battleMode === "score") {
     const ranked = [...players].sort((a, b) => {
       const scoreDiff = playerScore(b) - playerScore(a);
       if (scoreDiff !== 0) return scoreDiff;
+      const aTime = a.completedAt || Number.POSITIVE_INFINITY;
+      const bTime = b.completedAt || Number.POSITIVE_INFINITY;
+      if (aTime !== bTime) return aTime - bTime;
       return (a.hintsUsed || 0) - (b.hintsUsed || 0);
     });
     const top = ranked[0];
-    const second = ranked[1];
-    if (second && playerScore(top) === playerScore(second)) {
-      const completer = players.find((p) => p.uid === completerUid) || top;
-      return { winner: completer.uid, winnerName: completer.name };
-    }
     return { winner: top.uid, winnerName: top.name };
   }
 
@@ -83,6 +101,30 @@ function resolveWinner(players, completerUid, battleMode) {
     winner: completerUid,
     winnerName: completer?.name || "Jugador",
   };
+}
+
+/** Ends race immediately; score waits until every player finished their board. */
+function applyBoardCompletion(updates, players, board, solution, puzzle, battleMode, completerUid) {
+  if (!isBoardComplete(board, solution, puzzle)) {
+    return { players, matchFinished: false, waitingForOpponent: false };
+  }
+
+  let nextPlayers = markPlayerBoardCompleted(players, completerUid);
+  updates.players = nextPlayers;
+
+  if (battleMode === "score") {
+    if (!allPlayersBoardCompleted(nextPlayers)) {
+      return { players: nextPlayers, matchFinished: false, waitingForOpponent: true };
+    }
+  }
+
+  const result = resolveWinner(nextPlayers, completerUid, battleMode || "race");
+  updates.winner = result.winner;
+  updates.winnerName = result.winnerName;
+  updates.status = "finished";
+  updates.finishedAt = FieldValue.serverTimestamp();
+  updates.finishedBy = completerUid;
+  return { players: nextPlayers, matchFinished: true, waitingForOpponent: false };
 }
 
 export class GameService {
@@ -257,6 +299,11 @@ export class GameService {
       if (data.status !== "playing") throw new Error("La partida no est? activa");
       if (data.winner) throw new Error("La partida ya termin?");
 
+      const mePlayer = data.players.find((p) => p.uid === user.uid);
+      if (mePlayer?.boardCompleted) {
+        throw new Error("Ya completaste tu tablero. Espera al rival.");
+      }
+
       const puzzle = data.puzzle;
       const solution = data.solution;
       const boards = { ...data.boards };
@@ -302,7 +349,7 @@ export class GameService {
         const opponent = players.find((p) => p.uid !== user.uid);
         const attackType = pickRandomAttackType(me);
 
-        if (opponent && attackType) {
+        if (opponent && !opponent.boardCompleted && attackType) {
           const { targetRow, targetCol } = pickRandomAttackTarget(
             attackType,
             boards[opponent.uid],
@@ -341,14 +388,15 @@ export class GameService {
         updatedAt: FieldValue.serverTimestamp(),
       };
 
-      if (isBoardComplete(board, solution, puzzle)) {
-        const result = resolveWinner(players, user.uid, data.battleMode || "race");
-        updates.winner = result.winner;
-        updates.winnerName = result.winnerName;
-        updates.status = "finished";
-        updates.finishedAt = FieldValue.serverTimestamp();
-        updates.finishedBy = user.uid;
-      }
+      const completion = applyBoardCompletion(
+        updates,
+        players,
+        board,
+        solution,
+        puzzle,
+        data.battleMode || "race",
+        user.uid
+      );
 
       tx.update(docRef, updates);
       return {
@@ -357,6 +405,8 @@ export class GameService {
         fromHint: false,
         autoAttack,
         autoAttackAbsorbed,
+        waitingForOpponent: completion.waitingForOpponent,
+        boardCompleted: Boolean(completion.players.find((p) => p.uid === user.uid)?.boardCompleted),
       };
     });
   }
@@ -373,6 +423,11 @@ export class GameService {
       if (data.status !== "playing") throw new Error("La partida no est? activa");
       if (data.winner) throw new Error("La partida ya termin?");
 
+      const me = data.players.find((p) => p.uid === user.uid);
+      if (me?.boardCompleted) {
+        throw new Error("Ya completaste tu tablero. Espera al rival.");
+      }
+
       const puzzle = data.puzzle;
       const solution = data.solution;
       const boards = { ...data.boards };
@@ -383,7 +438,6 @@ export class GameService {
         throw new Error("Esa celda ya est? resuelta");
       }
 
-      const me = data.players.find((p) => p.uid === user.uid);
       const hintCheck = canUseHint(me);
       if (!hintCheck.ok) throw new Error(hintCheck.reason);
 
@@ -413,14 +467,15 @@ export class GameService {
         updatedAt: FieldValue.serverTimestamp(),
       };
 
-      if (isBoardComplete(board, solution, puzzle)) {
-        const result = resolveWinner(players, user.uid, data.battleMode || "race");
-        updates.winner = result.winner;
-        updates.winnerName = result.winnerName;
-        updates.status = "finished";
-        updates.finishedAt = FieldValue.serverTimestamp();
-        updates.finishedBy = user.uid;
-      }
+      const completion = applyBoardCompletion(
+        updates,
+        players,
+        board,
+        solution,
+        puzzle,
+        data.battleMode || "race",
+        user.uid
+      );
 
       tx.update(docRef, updates);
       return {
@@ -428,6 +483,8 @@ export class GameService {
         cost: HINT_COST,
         hintsUsed: (me?.hintsUsed || 0) + 1,
         winner: updates.winner === user.uid,
+        waitingForOpponent: completion.waitingForOpponent,
+        boardCompleted: Boolean(completion.players.find((p) => p.uid === user.uid)?.boardCompleted),
       };
     });
   }
@@ -443,6 +500,11 @@ export class GameService {
       const data = parseRoomData(doc.data());
       if (data.status !== "playing") throw new Error("La partida no est? activa");
       if (data.winner) throw new Error("La partida ya termin?");
+
+      const mePlayer = data.players.find((p) => p.uid === user.uid);
+      if (mePlayer?.boardCompleted) {
+        throw new Error("Ya completaste tu tablero. Espera al rival.");
+      }
 
       const lastMove = data.lastMoves?.[user.uid];
       if (!lastMove) throw new Error("No hay movimiento para deshacer");
@@ -515,6 +577,12 @@ export class GameService {
       const me = players.find((p) => p.uid === user.uid);
       const opponent = players.find((p) => p.uid !== user.uid);
       if (!me || !opponent) throw new Error("No hay oponente");
+      if (me.boardCompleted) {
+        throw new Error("Ya completaste tu tablero. Espera al rival.");
+      }
+      if (opponent.boardCompleted) {
+        throw new Error("El rival ya terminó su tablero");
+      }
 
       if (!canUseAttackType(me, attackType)) {
         throw new Error(`M?ximo ${MAX_ATTACK_USES} usos de este ataque`);
@@ -582,6 +650,9 @@ export class GameService {
 
       const me = data.players.find((p) => p.uid === user.uid);
       if (!me) throw new Error("Jugador no encontrado");
+      if (me.boardCompleted) {
+        throw new Error("Ya completaste tu tablero. Espera al rival.");
+      }
 
       if ((me.defensesBought || 0) >= MAX_DEFENSE_BUYS) {
         throw new Error(`M?ximo ${MAX_DEFENSE_BUYS} defensas por partida`);
