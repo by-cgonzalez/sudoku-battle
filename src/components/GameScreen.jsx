@@ -8,12 +8,14 @@ import {
   ATTACK_COSTS,
   DEFENSE_COST,
   MAX_DEFENSE_BUYS,
-  MAX_ATTACK_USES,
+  AUTO_ATTACK_EVERY,
+  ATTACK_REGEN_AMOUNT,
   isInputFrozen,
   getActiveAttacks,
   isCellBlocked,
   getAttackUses,
   canUseAttackType,
+  getAttackRegenInfo,
 } from "../lib/attacks";
 import {
   canUseHint,
@@ -39,12 +41,11 @@ import {
   MatchHud,
   getCompletedDigits,
 } from "./GameUI";
-import { HeadToHeadPanel } from "./HeadToHeadPanel";
 import { useSudokuKeyboard } from "../hooks/useSudokuKeyboard";
 
 export function GameScreen() {
   const { user } = useAuth();
-  const { room, rivalry, gameService, leaveRoom, getOpponent, getMe } = useGame();
+  const { room, gameService, leaveRoom, getOpponent, getMe } = useGame();
 
   const [selectedCell, setSelectedCell] = useState(null);
   const [status, setStatus] = useState({ message: "", type: "" });
@@ -237,6 +238,13 @@ export function GameScreen() {
   const oppFinal = playerScore(opponent);
   const hintCheck = canUseHint(me);
   const canHintNow = Boolean(selectedCell) && hintCheck.ok;
+  const attackRegen = getAttackRegenInfo(room.startedAt);
+  const attackLimit = attackRegen.limit;
+  const myLeadValue = room.battleMode === "score" ? myScore : me?.solvedCount || 0;
+  const oppLeadValue =
+    room.battleMode === "score" ? playerScore(opponent) : opponent?.solvedCount || 0;
+  const iLead = myLeadValue > oppLeadValue;
+  const oppLeads = oppLeadValue > myLeadValue;
   const canBuyDefense =
     !finished &&
     !boardDone &&
@@ -260,124 +268,132 @@ export function GameScreen() {
     [myBoard, room.puzzle]
   );
 
-  const shopBlock = (
-    <>
-      <div className="attack-info card-small">
-        <h3>⚔️ Combate</h3>
-        <p>Cada acierto lanza un ataque al azar (máx. {MAX_ATTACK_USES} por tipo).</p>
-        <ul>
-          <li><strong>Congelar</strong> — 4 seg</li>
-          <li><strong>Bloquear línea</strong> — 10 seg</li>
-          <li><strong>Bloquear celda</strong> — 10 seg</li>
-        </ul>
-        <p className="shop-meta">
-          Escudos: {me?.defenseCharges || 0} · Usos: ❄️{getAttackUses(me, ATTACK_TYPES.FREEZE_INPUT)}/{MAX_ATTACK_USES}
-          {" · "}➖{getAttackUses(me, ATTACK_TYPES.BLOCK_LINE)}/{MAX_ATTACK_USES}
-          {" · "}🚫{getAttackUses(me, ATTACK_TYPES.BLOCK_CELL)}/{MAX_ATTACK_USES}
-        </p>
-      </div>
+  const regenLabel = (() => {
+    const m = Math.floor(attackRegen.nextInSec / 60);
+    const s = attackRegen.nextInSec % 60;
+    return `${m}:${String(s).padStart(2, "0")}`;
+  })();
 
-      <div className="attack-shop card-small">
-        <h3>🛒 Tienda</h3>
+  const combatPanel = (
+    <div className="attack-info card-small combat-panel">
+      <h3>⚔️ Combate</h3>
+      <p>
+        Auto-ataque cada {AUTO_ATTACK_EVERY} aciertos. Cada 3 min +{ATTACK_REGEN_AMOUNT} usos
+        por tipo.
+      </p>
+      <ul>
+        <li><strong>Congelar</strong> — 4 seg</li>
+        <li><strong>Bloquear línea</strong> — 10 seg</li>
+        <li><strong>Bloquear celda</strong> — 10 seg</li>
+      </ul>
+      <p className="shop-meta attack-regen-meta">
+        Límite {attackLimit}/tipo · +{ATTACK_REGEN_AMOUNT} en {regenLabel}
+      </p>
+      <p className="shop-meta">
+        Escudos: {me?.defenseCharges || 0} · Usos: ❄️{getAttackUses(me, ATTACK_TYPES.FREEZE_INPUT)}/{attackLimit}
+        {" · "}➖{getAttackUses(me, ATTACK_TYPES.BLOCK_LINE)}/{attackLimit}
+        {" · "}🚫{getAttackUses(me, ATTACK_TYPES.BLOCK_CELL)}/{attackLimit}
+      </p>
+    </div>
+  );
+
+  const shopPanel = (
+    <div className="attack-shop card-small shop-panel">
+      <h3>🛒 Tienda</h3>
+      <div className="shop-row">
+        <div className="shop-item-info">
+          <span className="shop-item-title">🛡️ Defensa</span>
+          <span className="shop-item-meta">
+            −{DEFENSE_COST} pts · {me?.defensesBought || 0}/{MAX_DEFENSE_BUYS}
+          </span>
+        </div>
         <button
           type="button"
-          className="shop-btn"
+          className="shop-buy-btn"
           disabled={!canBuyDefense || shopBusy}
           onClick={handleBuyDefense}
-          title={`Defensa (−${DEFENSE_COST} pts)`}
+          title={`Comprar defensa (−${DEFENSE_COST} pts)`}
         >
-          🛡️ Defensa −{DEFENSE_COST} · {me?.defensesBought || 0}/{MAX_DEFENSE_BUYS}
+          Comprar
         </button>
-        {Object.values(ATTACK_TYPES).map((type) => {
-          const info = ATTACK_LABELS[type];
-          const cost = ATTACK_COSTS[type];
-          const uses = getAttackUses(me, type);
-          const canBuy =
-            !finished &&
-            !boardDone &&
-            !opponent?.boardCompleted &&
-            canUseAttackType(me, type) &&
-            myScore >= cost &&
-            !shopBusy;
-          return (
+      </div>
+      {Object.values(ATTACK_TYPES).map((type) => {
+        const info = ATTACK_LABELS[type];
+        const cost = ATTACK_COSTS[type];
+        const uses = getAttackUses(me, type);
+        const canBuy =
+          !finished &&
+          !boardDone &&
+          !opponent?.boardCompleted &&
+          canUseAttackType(me, type, attackLimit) &&
+          myScore >= cost &&
+          !shopBusy;
+        return (
+          <div key={type} className="shop-row">
+            <div className="shop-item-info">
+              <span className="shop-item-title">
+                {info.icon} {info.title}
+              </span>
+              <span className="shop-item-meta">
+                −{cost} pts · {uses}/{attackLimit}
+              </span>
+            </div>
             <button
-              key={type}
               type="button"
-              className="shop-btn"
+              className="shop-buy-btn"
               disabled={!canBuy}
               onClick={() => handleBuyAttack(type)}
-              title={`${info.title} (−${cost} pts)`}
+              title={`Comprar ${info.title} (−${cost} pts)`}
             >
-              {info.icon} {info.title} −{cost} · {uses}/{MAX_ATTACK_USES}
+              Comprar
             </button>
-          );
-        })}
-      </div>
+          </div>
+        );
+      })}
+    </div>
+  );
 
-      {options.hints && (
-        <div className="attack-info card-small">
-          <h3>💡 Hints</h3>
-          <p>
-            −{HINT_COST} pts · {me?.hintsUsed || 0}/{MAX_HINTS} usados
-            {!hintCheck.ok ? ` · ${hintCheck.reason}` : ""}
-          </p>
-        </div>
-      )}
+  const hintsPanel = options.hints ? (
+    <div className="attack-info card-small">
+      <h3>💡 Hints</h3>
+      <p>
+        −{HINT_COST} pts · {me?.hintsUsed || 0}/{MAX_HINTS} usados
+        {!hintCheck.ok ? ` · ${hintCheck.reason}` : ""}
+      </p>
+    </div>
+  ) : null;
+
+  const extrasBlock = (
+    <>
+      {combatPanel}
+      {shopPanel}
+      {hintsPanel}
     </>
   );
 
   return (
     <section className="screen active game-screen">
-      <div className="game-layout">
-        <aside className="game-sidebar desktop-sidebar">
-          <div className="game-badges">
-            <div className="difficulty-badge-game">{diff.icon} {diff.label}</div>
-            <div className="difficulty-badge-game">{battle.icon} {battle.label}</div>
+      <div className="game-layout game-layout-versus">
+        <main className="game-board-area">
+          <div className="versus-top-bar desktop-versus-top">
+            <button
+              type="button"
+              className="btn btn-ghost versus-leave-btn"
+              onClick={leaveRoom}
+            >
+              Abandonar
+            </button>
+            <div className="versus-score-stack">
+              {options.timer && <TimerDisplay seconds={elapsed} compact />}
+              <ScorePanel
+                me={me}
+                opponent={opponent}
+                battleMode={room.battleMode || "race"}
+                mistakes={mistakes}
+              />
+            </div>
           </div>
 
-          {options.timer && <TimerDisplay seconds={elapsed} />}
-
-          <ScorePanel me={me} opponent={opponent} battleMode={room.battleMode || "race"} />
-          {waitingForOpponent && (
-            <div className="waiting-banner card-small">
-              <strong>¡Completaste tu sudoku!</strong>
-              <p>Esperando a que {oppName} termine para definir el ganador por puntos.</p>
-            </div>
-          )}
-          {room.battleMode === "score" && opponent?.boardCompleted && !finished && !boardDone && (
-            <div className="waiting-banner rival-done card-small">
-              <strong>{oppName} ya terminó</strong>
-              <p>Completa tu tablero para cerrar la ronda.</p>
-            </div>
-          )}
-
-          {opponent && (
-            <HeadToHeadPanel rivalry={rivalry} opponent={opponent} compact />
-          )}
-
-          {shopBlock}
-
-          {activeAttacks.length > 0 && (
-            <div className="attack-banner desktop-only-banner">
-              {activeAttacks.map((a) => {
-                const remaining = Math.max(0, Math.ceil((a.expiresAt - Date.now()) / 1000));
-                const label = ATTACK_LABELS[a.type]?.title || a.type;
-                return (
-                  <div key={a.id} className="attack-effect">
-                    ⚡ {label} — {remaining}s
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-          <p className={`status-message ${status.type}`}>{status.message}</p>
-          <button type="button" className="btn btn-ghost" onClick={leaveRoom}>
-            Abandonar
-          </button>
-        </aside>
-
-        <main className="game-board-area">
           <MatchHud
             showTimer={options.timer}
             elapsed={elapsed}
@@ -385,10 +401,13 @@ export function GameScreen() {
             oppProgress={opponent?.solvedCount ?? 0}
             totalEmpty={totalEmpty}
             mistakes={mistakes}
-            myScore={room.battleMode === "score" ? myScore : null}
+            myScore={myScore}
             activeAttacks={activeAttacks}
             defenseCharges={me?.defenseCharges || 0}
             opponentName={oppName}
+            attackRegen={attackRegen}
+            iLead={iLead}
+            oppLeads={oppLeads}
           />
 
           <div className="board-toolbar">
@@ -467,19 +486,52 @@ export function GameScreen() {
               {extrasOpen ? "▾" : "▸"} Tienda y combate
               {(me?.defenseCharges || 0) > 0 ? ` · 🛡️${me.defenseCharges}` : ""}
             </button>
-            {extrasOpen && (
-              <div className="mobile-extras-body">
-                {shopBlock}
-                {opponent && (
-                  <HeadToHeadPanel rivalry={rivalry} opponent={opponent} compact />
-                )}
-              </div>
-            )}
+            {extrasOpen && <div className="mobile-extras-body">{extrasBlock}</div>}
             <button type="button" className="btn btn-ghost mobile-leave" onClick={leaveRoom}>
               Abandonar
             </button>
           </div>
         </main>
+
+        <aside className="game-sidebar desktop-sidebar">
+          <div className="game-badges">
+            <div className="difficulty-badge-game">{diff.icon} {diff.label}</div>
+            <div className="difficulty-badge-game">{battle.icon} {battle.label}</div>
+          </div>
+
+          {waitingForOpponent && (
+            <div className="waiting-banner card-small">
+              <strong>¡Completaste tu sudoku!</strong>
+              <p>Esperando a que {oppName} termine para definir el ganador por puntos.</p>
+            </div>
+          )}
+          {room.battleMode === "score" && opponent?.boardCompleted && !finished && !boardDone && (
+            <div className="waiting-banner rival-done card-small">
+              <strong>{oppName} ya terminó</strong>
+              <p>Completa tu tablero para cerrar la ronda.</p>
+            </div>
+          )}
+
+          {combatPanel}
+          {shopPanel}
+          {hintsPanel}
+
+          {activeAttacks.length > 0 && (
+            <div className="attack-banner desktop-only-banner">
+              {activeAttacks.map((a) => {
+                const remaining = Math.max(0, Math.ceil((a.expiresAt - Date.now()) / 1000));
+                const label = ATTACK_LABELS[a.type]?.title || a.type;
+                return (
+                  <div key={a.id} className="attack-effect">
+                    ⚡ {label} — {remaining}s
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <p className={`status-message ${status.type}`}>{status.message}</p>
+        </aside>
       </div>
 
       {finished && (

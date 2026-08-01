@@ -13,7 +13,7 @@ import { getUserDisplayName } from "../lib/auth";
 import { HeadToHeadPanel } from "./HeadToHeadPanel";
 import { OptionsPanel } from "./OptionsPanel";
 
-function inviteQrUrl(inviteUrl, size = 112) {
+function inviteQrUrl(inviteUrl, size = 72) {
   const params = new URLSearchParams({
     text: inviteUrl,
     size: String(size),
@@ -22,6 +22,38 @@ function inviteQrUrl(inviteUrl, size = 112) {
     light: "00000000",
   });
   return `https://quickchart.io/qr?${params.toString()}`;
+}
+
+function FighterCard({ player, side, isHost, waiting = false }) {
+  if (waiting || !player) {
+    return (
+      <div className={`fighter-card fighter-${side} fighter-empty`}>
+        <div className="fighter-avatar waiting" aria-hidden="true">
+          <span>?</span>
+        </div>
+        <div className="fighter-info">
+          <strong className="fighter-name">Esperando rival</strong>
+          <span className="fighter-role">Plaza libre</span>
+        </div>
+      </div>
+    );
+  }
+
+  const initial = (player.name || "?").trim().charAt(0).toUpperCase();
+
+  return (
+    <div className={`fighter-card fighter-${side}`}>
+      <div className="fighter-avatar" aria-hidden="true">
+        {player.photoURL ? <img src={player.photoURL} alt="" /> : <span>{initial}</span>}
+      </div>
+      <div className="fighter-info">
+        <strong className="fighter-name">{player.name}</strong>
+        <span className="fighter-role">
+          {side === "left" ? "🛡️" : "⚔️"} {isHost ? "Anfitrión" : "Rival"}
+        </span>
+      </div>
+    </div>
+  );
 }
 
 export function RoomScreen() {
@@ -44,6 +76,8 @@ export function RoomScreen() {
   const opponent = getOpponent(room);
   const isHost = room.hostId === user?.uid;
   const canStart = isHost && room.players.length === MAX_PLAYERS;
+  const me = room.players.find((p) => p.uid === user?.uid) || room.players[0];
+  const rival = opponent || null;
   const inviteText = buildInviteText({
     code: room.code,
     hostName: getUserDisplayName(user),
@@ -90,78 +124,37 @@ export function RoomScreen() {
     <section className="screen active">
       <div className="room-layout">
         <div className="card room-card">
-          <div className="room-hero">
+          <div className="room-hero room-hero-compact">
             <div className="room-hero-main">
               <p className="room-label">Código de sala</p>
               <h2 className="room-code">{room.code}</h2>
-
               <div className="room-meta">
                 <span className="room-difficulty-badge">{diff.icon} {diff.label}</span>
                 <span className="room-difficulty-badge">{battle.icon} {battle.label}</span>
               </div>
-              <p className="subtitle room-hero-desc">{battle.desc}</p>
-            </div>
-
-            <a
-              className="room-qr"
-              href={inviteUrl}
-              target="_blank"
-              rel="noreferrer"
-              title="Escanea desde el celular para unirte"
-            >
-              <img src={qrSrc} alt={`QR para unirse a la sala ${room.code}`} width={112} height={112} />
-            </a>
-          </div>
-
-          <div className="invite-panel">
-            <h3>Invitar rival</h3>
-            <p className="invite-url">{inviteUrl}</p>
-            <div className="invite-actions">
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={() => copyValue(room.code, "code")}
-              >
-                {copied === "code" ? "Código copiado" : "Copiar código"}
-              </button>
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={() => copyValue(inviteUrl, "link")}
-              >
-                {copied === "link" ? "Link copiado" : "Copiar link"}
-              </button>
-              <button type="button" className="btn btn-primary" onClick={shareInvite}>
-                {copied === "invite" ? "Invitación copiada" : "Compartir invitación"}
-              </button>
             </div>
           </div>
 
-          <ul className="players-list">
-            {room.players.map((p, i) => (
-              <li key={p.uid} className="player-card">
-                <div className="player-avatar">
-                  {p.photoURL ? <img src={p.photoURL} alt="" /> : <span>{p.name[0]}</span>}
-                </div>
-                <div>
-                  <strong>{p.name}</strong>
-                  <span className="player-slot">
-                    Jugador {i + 1}
-                    {p.uid === room.hostId ? " · Anfitrión" : ""}
-                  </span>
-                </div>
-              </li>
-            ))}
-            {Array.from({ length: MAX_PLAYERS - room.players.length }).map((_, i) => (
-              <li key={`empty-${i}`} className="player-card empty">
-                <span>Esperando jugador...</span>
-              </li>
-            ))}
-          </ul>
-
-          {opponent && room.players.length === MAX_PLAYERS && (
-            <HeadToHeadPanel rivalry={rivalry} opponent={opponent} />
-          )}
+          <div className="battle-arena" aria-label="Enfrentamiento">
+            <FighterCard
+              player={me}
+              side="left"
+              isHost={me?.uid === room.hostId}
+            />
+            <div className="battle-center">
+              <span className="battle-vs-icon" aria-hidden="true">⚔️</span>
+              <span className="battle-vs">VS</span>
+              <span className="battle-ready">
+                {rival ? "Listos para combatir" : "Buscando rival…"}
+              </span>
+            </div>
+            <FighterCard
+              player={rival}
+              side="right"
+              isHost={rival?.uid === room.hostId}
+              waiting={!rival}
+            />
+          </div>
 
           <p className="host-hint">
             {isHost
@@ -172,18 +165,70 @@ export function RoomScreen() {
           </p>
           <p className={`status-message ${status.type}`}>{status.message}</p>
 
-          <div className="room-actions">
+          <div className="room-actions room-actions-top">
             <button
               type="button"
               className="btn btn-primary btn-large"
               disabled={!canStart}
               onClick={startGame}
             >
-              Iniciar partida
+              ⚔️ Iniciar partida
             </button>
             <button type="button" className="btn btn-ghost" onClick={leaveRoom}>
               Salir de la sala
             </button>
+          </div>
+
+          {opponent && room.players.length === MAX_PLAYERS && (
+            <HeadToHeadPanel rivalry={rivalry} opponent={opponent} />
+          )}
+
+          <div className="invite-panel invite-panel-compact">
+            <div className="invite-compact-main">
+              <div className="invite-compact-copy">
+                <h3>Invitar rival</h3>
+                <p className="invite-url" title={inviteUrl}>
+                  {inviteUrl}
+                </p>
+                <div className="invite-actions">
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => copyValue(room.code, "code")}
+                  >
+                    {copied === "code" ? "Código ✓" : "Código"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => copyValue(inviteUrl, "link")}
+                  >
+                    {copied === "link" ? "Link ✓" : "Link"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    onClick={shareInvite}
+                  >
+                    {copied === "invite" ? "Copiado ✓" : "Compartir"}
+                  </button>
+                </div>
+              </div>
+              <a
+                className="room-qr room-qr-compact"
+                href={inviteUrl}
+                target="_blank"
+                rel="noreferrer"
+                title="Escanea desde el celular para unirte"
+              >
+                <img
+                  src={qrSrc}
+                  alt={`QR para unirse a la sala ${room.code}`}
+                  width={72}
+                  height={72}
+                />
+              </a>
+            </div>
           </div>
         </div>
 

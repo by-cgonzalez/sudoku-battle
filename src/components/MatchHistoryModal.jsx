@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useState } from "react";
 import { useAuth } from "../contexts/AuthContext";
 import { getBattleMode } from "../lib/features";
 import { getDifficulty } from "../lib/difficulty";
@@ -6,7 +6,38 @@ import { formatHistoryDate, getVersusHistory } from "../lib/matchHistory";
 
 export function MatchHistoryModal({ onClose }) {
   const { user } = useAuth();
-  const history = useMemo(() => getVersusHistory(user?.uid), [user?.uid]);
+  const [history, setHistory] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    const uid = user?.uid;
+
+    if (!uid) {
+      setHistory([]);
+      setLoading(false);
+      return undefined;
+    }
+
+    setLoading(true);
+    getVersusHistory(uid)
+      .then((list) => {
+        if (!cancelled) {
+          setHistory(list);
+          setLoading(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setHistory([]);
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.uid]);
 
   const wins = history.filter((m) => m.won).length;
   const losses = history.length - wins;
@@ -22,11 +53,13 @@ export function MatchHistoryModal({ onClose }) {
         </div>
 
         <p className="hint">
-          Tus partidas 1v1 en este dispositivo
-          {history.length > 0 ? ` · ${wins}V / ${losses}D` : ""}.
+          Tus partidas 1v1 vinculadas a tu perfil
+          {!loading && history.length > 0 ? ` · ${wins}V / ${losses}D` : ""}.
         </p>
 
-        {history.length === 0 ? (
+        {loading ? (
+          <p className="ranking-empty">Cargando historial…</p>
+        ) : history.length === 0 ? (
           <p className="ranking-empty">Aún no tienes partidas versus registradas.</p>
         ) : (
           <ul className="history-list">

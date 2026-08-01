@@ -209,7 +209,7 @@ export function GameProvider({ children }) {
     const opponent = getOpponent(room);
     const won = room.winner === user.uid;
     const diff = getDifficulty(room.difficulty);
-    recordVersusMatch(user.uid, {
+    void recordVersusMatch(user.uid, {
       roomId: room.id,
       finishedAt: Date.now(),
       won,
