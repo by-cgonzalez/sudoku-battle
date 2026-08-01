@@ -6,7 +6,22 @@ import {
   flattenBoards,
   unflattenBoards,
 } from "./sudoku";
-import { createAttack, pruneExpiredAttacks, emptyAttackUses, pickRandomAttackType, pickRandomAttackTarget, resolveIncomingAttack, incrementAttackUse, canUseAttackType, ATTACK_COSTS, DEFENSE_COST, MAX_DEFENSE_BUYS, MAX_ATTACK_USES, ATTACK_LABELS } from "./attacks";
+import {
+  createAttack,
+  pruneExpiredAttacks,
+  emptyAttackUses,
+  pickRandomAttackType,
+  pickRandomAttackTarget,
+  resolveIncomingAttack,
+  incrementAttackUse,
+  canUseAttackType,
+  getAttackUseLimit,
+  shouldTriggerAutoAttack,
+  ATTACK_COSTS,
+  DEFENSE_COST,
+  MAX_DEFENSE_BUYS,
+  ATTACK_LABELS,
+} from "./attacks";
 import { getCurrentUser, getUserDisplayName } from "./auth";
 import { getDifficulty, DEFAULT_DIFFICULTY } from "./difficulty";
 import {
@@ -347,7 +362,10 @@ export class GameService {
       if (wasCorrect) {
         const me = players.find((p) => p.uid === user.uid);
         const opponent = players.find((p) => p.uid !== user.uid);
-        const attackType = pickRandomAttackType(me);
+        const attackLimit = getAttackUseLimit(data.startedAt);
+        const attackType = shouldTriggerAutoAttack(me?.solvedCount || 0)
+          ? pickRandomAttackType(me, attackLimit)
+          : null;
 
         if (opponent && !opponent.boardCompleted && attackType) {
           const { targetRow, targetCol } = pickRandomAttackTarget(
@@ -584,8 +602,9 @@ export class GameService {
         throw new Error("El rival ya terminó su tablero");
       }
 
-      if (!canUseAttackType(me, attackType)) {
-        throw new Error(`M?ximo ${MAX_ATTACK_USES} usos de este ataque`);
+      const attackLimit = getAttackUseLimit(data.startedAt);
+      if (!canUseAttackType(me, attackType, attackLimit)) {
+        throw new Error(`Máximo ${attackLimit} usos de este ataque`);
       }
 
       const cost = paid ? ATTACK_COSTS[attackType] || 0 : 0;

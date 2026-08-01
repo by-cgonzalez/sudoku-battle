@@ -5,6 +5,9 @@ export const ATTACK_TYPES = {
 };
 
 export const MAX_ATTACK_USES = 3;
+export const AUTO_ATTACK_EVERY = 5;
+export const ATTACK_REGEN_INTERVAL_MS = 3 * 60 * 1000;
+export const ATTACK_REGEN_AMOUNT = 2;
 export const MAX_DEFENSE_BUYS = 3;
 export const DEFENSE_COST = 5;
 
@@ -50,16 +53,62 @@ export function getAttackUses(player, type) {
   return player?.attackUses?.[type] || 0;
 }
 
-export function canUseAttackType(player, type) {
-  return getAttackUses(player, type) < MAX_ATTACK_USES;
+/** Max uses per attack type, growing +2 every 3 minutes of match time. */
+export function getAttackUseLimit(startedAt, now = Date.now()) {
+  const start =
+    typeof startedAt?.toMillis === "function"
+      ? startedAt.toMillis()
+      : typeof startedAt?.seconds === "number"
+        ? startedAt.seconds * 1000
+        : typeof startedAt === "number"
+          ? startedAt
+          : null;
+  if (!start) return MAX_ATTACK_USES;
+  const elapsed = Math.max(0, now - start);
+  const bonuses = Math.floor(elapsed / ATTACK_REGEN_INTERVAL_MS);
+  return MAX_ATTACK_USES + bonuses * ATTACK_REGEN_AMOUNT;
 }
 
-export function availableAttackTypes(player) {
-  return Object.values(ATTACK_TYPES).filter((type) => canUseAttackType(player, type));
+export function getAttackRegenInfo(startedAt, now = Date.now()) {
+  const limit = getAttackUseLimit(startedAt, now);
+  const start =
+    typeof startedAt?.toMillis === "function"
+      ? startedAt.toMillis()
+      : typeof startedAt?.seconds === "number"
+        ? startedAt.seconds * 1000
+        : typeof startedAt === "number"
+          ? startedAt
+          : null;
+  if (!start) {
+    return {
+      limit,
+      nextInSec: Math.ceil(ATTACK_REGEN_INTERVAL_MS / 1000),
+      amount: ATTACK_REGEN_AMOUNT,
+    };
+  }
+  const elapsed = Math.max(0, now - start);
+  const nextAt = (Math.floor(elapsed / ATTACK_REGEN_INTERVAL_MS) + 1) * ATTACK_REGEN_INTERVAL_MS;
+  return {
+    limit,
+    nextInSec: Math.max(0, Math.ceil((nextAt - elapsed) / 1000)),
+    amount: ATTACK_REGEN_AMOUNT,
+  };
 }
 
-export function pickRandomAttackType(player) {
-  const available = availableAttackTypes(player);
+export function shouldTriggerAutoAttack(solvedCount) {
+  return solvedCount > 0 && solvedCount % AUTO_ATTACK_EVERY === 0;
+}
+
+export function canUseAttackType(player, type, limit = MAX_ATTACK_USES) {
+  return getAttackUses(player, type) < limit;
+}
+
+export function availableAttackTypes(player, limit = MAX_ATTACK_USES) {
+  return Object.values(ATTACK_TYPES).filter((type) => canUseAttackType(player, type, limit));
+}
+
+export function pickRandomAttackType(player, limit = MAX_ATTACK_USES) {
+  const available = availableAttackTypes(player, limit);
   if (available.length === 0) return null;
   return available[Math.floor(Math.random() * available.length)];
 }

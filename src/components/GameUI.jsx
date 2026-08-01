@@ -258,20 +258,33 @@ export function GameTools({
   );
 }
 
-export function TimerDisplay({ seconds, label = "Tiempo" }) {
+export function TimerDisplay({ seconds, label = "Tiempo", compact = false }) {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
+  const value = `${m}:${String(s).padStart(2, "0")}`;
+  if (compact) {
+    return (
+      <div className="timer-display timer-display-compact" title={label}>
+        <span className="timer-label">⏱️</span>
+        <strong className="timer-value">{value}</strong>
+      </div>
+    );
+  }
   return (
     <div className="timer-display card-small">
       <span className="timer-label">{label}</span>
-      <strong className="timer-value">
-        {m}:{String(s).padStart(2, "0")}
-      </strong>
+      <strong className="timer-value">{value}</strong>
     </div>
   );
 }
 
 function formatHudTime(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function formatRegenCountdown(seconds) {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return `${m}:${String(s).padStart(2, "0")}`;
@@ -295,6 +308,9 @@ export function MatchHud({
   hintsUsed = null,
   maxHints = MAX_HINTS,
   showProgressBar = false,
+  attackRegen = null,
+  iLead = false,
+  oppLeads = false,
 }) {
   const pct =
     totalEmpty > 0 ? Math.min(100, Math.round((myProgress / totalEmpty) * 100)) : 0;
@@ -314,16 +330,22 @@ export function MatchHud({
             <strong>{formatHudTime(elapsed)}</strong>
           </div>
         )}
-        <div className="match-hud-chip">
-          <span className="match-hud-k">{progressLabel}</span>
+        <div className={`match-hud-chip ${iLead ? "leading" : ""}`}>
+          <span className="match-hud-k">
+            {iLead ? "👑 " : ""}
+            {progressLabel}
+          </span>
           <strong>
             {myProgress}/{totalEmpty}
             {myScore != null ? ` · ${myScore}pts` : ""}
           </strong>
         </div>
         {oppProgress != null && (
-          <div className="match-hud-chip rival">
-            <span className="match-hud-k">{opponentName}</span>
+          <div className={`match-hud-chip rival ${oppLeads ? "leading" : ""}`}>
+            <span className="match-hud-k">
+              {oppLeads ? "👑 " : ""}
+              {opponentName}
+            </span>
             <strong>{oppProgress}/{totalEmpty}</strong>
           </div>
         )}
@@ -346,6 +368,12 @@ export function MatchHud({
           </div>
         )}
       </div>
+      {attackRegen && (
+        <div className="match-hud-regen" title="Cada 3 min +2 usos por tipo de ataque">
+          ⚔️ Límite {attackRegen.limit}/tipo · +{attackRegen.amount} en{" "}
+          {formatRegenCountdown(attackRegen.nextInSec)}
+        </div>
+      )}
       {showProgressBar && (
         <div className="match-hud-bar" aria-hidden="true">
           <div className="match-hud-bar-fill" style={{ width: `${pct}%` }} />
@@ -369,46 +397,48 @@ export function MatchHud({
   );
 }
 
-export function ScorePanel({ me, opponent, battleMode = "race" }) {
+export function ScorePanel({ me, opponent, battleMode = "race", mistakes = 0 }) {
   const mode = getBattleMode(battleMode);
   const myScore = playerScore(me);
   const oppScore = playerScore(opponent);
   const mySolved = me?.solvedCount || 0;
   const oppSolved = opponent?.solvedCount || 0;
-  const iLead = battleMode === "score" ? myScore > oppScore : mySolved > oppSolved;
-  const oppLeads = battleMode === "score" ? oppScore > myScore : oppSolved > mySolved;
+  const myValue = battleMode === "score" ? myScore : mySolved;
+  const oppValue = battleMode === "score" ? oppScore : oppSolved;
+  const iLead = myValue > oppValue;
+  const oppLeads = oppValue > myValue;
+  const unit = battleMode === "score" ? "pts" : "aciertos";
+  const oppName = opponent?.name?.split(" ")[0] || "Rival";
 
   return (
-    <div className="score-panel">
-      <div className="mode-chip" title={mode.desc}>
-        {mode.icon} {mode.label}
-      </div>
-      <div className={`score-box me ${iLead ? "leading" : ""} ${me?.boardCompleted ? "done" : ""}`}>
-        <span className="score-label">Tú{me?.boardCompleted ? " ✓" : ""}</span>
-        <div className="score-value-wrap">
-          {iLead && <span className="score-crown" title="Vas ganando">👑</span>}
-          <span className="score-value">{battleMode === "score" ? myScore : mySolved}</span>
+    <div className="score-panel score-panel-minimal" title={mode.desc}>
+      <div className={`score-side me ${iLead ? "leading" : ""} ${me?.boardCompleted ? "done" : ""}`}>
+        <div className="score-identity">
+          {iLead && <span className="score-crown" aria-hidden="true">👑</span>}
+          <span className="score-name">Tú{me?.boardCompleted ? " ✓" : ""}</span>
         </div>
-        <span className="score-sub">
-          {battleMode === "score"
-            ? `${mySolved} aciertos · ${me?.hintsUsed || 0} hints`
-            : "aciertos"}
+        <strong className="score-num">{myValue}</strong>
+        <span className="score-meta">
+          {battleMode === "score" ? `${mySolved} aciertos` : `${myScore} pts`}
+          {" · "}
+          {mistakes}✗
         </span>
       </div>
-      <div className="vs-badge">VS</div>
-      <div className={`score-box opponent ${oppLeads ? "leading" : ""} ${opponent?.boardCompleted ? "done" : ""}`}>
-        <span className="score-label">
-          {opponent?.name || "Rival"}
-          {opponent?.boardCompleted ? " ✓" : ""}
-        </span>
-        <div className="score-value-wrap">
-          {oppLeads && <span className="score-crown" title="Va ganando">👑</span>}
-          <span className="score-value">{battleMode === "score" ? oppScore : oppSolved}</span>
+      <div className="score-center">
+        <span className="vs-badge">VS</span>
+        <span className="score-unit">{unit}</span>
+      </div>
+      <div className={`score-side opponent ${oppLeads ? "leading" : ""} ${opponent?.boardCompleted ? "done" : ""}`}>
+        <div className="score-identity">
+          {oppLeads && <span className="score-crown" aria-hidden="true">👑</span>}
+          <span className="score-name">
+            {oppName}
+            {opponent?.boardCompleted ? " ✓" : ""}
+          </span>
         </div>
-        <span className="score-sub">
-          {battleMode === "score"
-            ? `${oppSolved} aciertos · ${opponent?.hintsUsed || 0} hints`
-            : "aciertos"}
+        <strong className="score-num">{oppValue}</strong>
+        <span className="score-meta">
+          {battleMode === "score" ? `${oppSolved} aciertos` : `${oppScore} pts`}
         </span>
       </div>
     </div>
