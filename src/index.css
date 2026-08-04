@@ -2999,6 +2999,11 @@ input:focus {
   gap: 0.45rem;
 }
 
+.attack-shop > .shop-meta {
+  margin-top: 0;
+  margin-bottom: 0.1rem;
+}
+
 .attack-shop h3,
 .combat-panel h3 {
   margin-bottom: 0.15rem;

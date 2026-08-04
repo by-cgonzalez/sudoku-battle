@@ -420,6 +420,7 @@ export function ScorePanel({ me, opponent, battleMode = "race", mistakes = 0 }) 
         <strong className="score-num">{myValue}</strong>
         <span className="score-meta">
           {battleMode === "score" ? `${mySolved} aciertos` : `${myScore} pts`}
+          {(me?.streak || 0) >= 5 ? ` · racha ${me.streak}` : ""}
           {" · "}
           {mistakes}✗
         </span>
