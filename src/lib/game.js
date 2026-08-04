@@ -10,14 +10,12 @@ import {
   createAttack,
   pruneExpiredAttacks,
   emptyAttackUses,
-  pickRandomAttackType,
   pickRandomAttackTarget,
   resolveIncomingAttack,
   incrementAttackUse,
   canUseAttackType,
   getAttackUseLimit,
-  shouldTriggerAutoAttack,
-  ATTACK_COSTS,
+  shouldEarnAttackCredit,
   DEFENSE_COST,
   MAX_DEFENSE_BUYS,
   ATTACK_LABELS,
@@ -30,7 +28,9 @@ import {
   HINT_COST,
   canUseHint,
   normalizeGameOptions,
+  placementScoreKey,
   playerScore,
+  pointsForPlacement,
 } from "./features";
 import { db, firebase } from "./firebase";
 
@@ -55,6 +55,10 @@ function playerPayload(user) {
     email: user.email || "",
     photoURL: user.photoURL || "",
     solvedCount: 0,
+    score: 0,
+    streak: 0,
+    attackCredits: 0,
+    placementScores: {},
     hintsUsed: 0,
     pointsSpent: 0,
     defenseCharges: 0,
@@ -325,8 +329,27 @@ export class GameService {
       const board = boards[user.uid].map((r) => [...r]);
 
       if (puzzle[row][col] !== 0) throw new Error("Celda fija");
+
+      // Wrong guess: break streak (persisted) without placing the number.
       if (value !== 0 && value !== solution[row][col]) {
-        throw new Error("N?mero incorrecto");
+        const players = data.players.map((p) =>
+          p.uid === user.uid ? { ...p, streak: 0 } : p
+        );
+        tx.update(docRef, {
+          players,
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+        return {
+          wasCorrect: false,
+          streakBroken: true,
+          streak: 0,
+          winner: false,
+          fromHint: false,
+          attackCreditEarned: false,
+          pointsEarned: 0,
+          waitingForOpponent: false,
+          boardCompleted: false,
+        };
       }
 
       const previous = board[row][col];
@@ -341,62 +364,82 @@ export class GameService {
       let players = data.players.map((p) => ({
         ...p,
         attackUses: { ...emptyAttackUses(), ...(p.attackUses || {}) },
+        placementScores: { ...(p.placementScores || {}) },
       }));
 
-      if (wasCorrect) {
-        players = players.map((p) =>
-          p.uid === user.uid ? { ...p, solvedCount: (p.solvedCount || 0) + 1 } : p
-        );
-      } else if (wasCleared) {
-        players = players.map((p) =>
-          p.uid === user.uid
-            ? { ...p, solvedCount: Math.max(0, (p.solvedCount || 0) - 1) }
-            : p
-        );
-      }
-
-      let attacks = pruneExpiredAttacks(data.attacks);
-      let autoAttack = null;
-      let autoAttackAbsorbed = false;
+      let pointsEarned = 0;
+      let attackCreditEarned = false;
+      let nextStreak = mePlayer?.streak || 0;
 
       if (wasCorrect) {
-        const me = players.find((p) => p.uid === user.uid);
-        const opponent = players.find((p) => p.uid !== user.uid);
-        const attackLimit = getAttackUseLimit(data.startedAt);
-        const attackType = shouldTriggerAutoAttack(me?.solvedCount || 0)
-          ? pickRandomAttackType(me, attackLimit)
-          : null;
-
-        if (opponent && !opponent.boardCompleted && attackType) {
-          const { targetRow, targetCol } = pickRandomAttackTarget(
-            attackType,
-            boards[opponent.uid],
-            puzzle
+        const key = placementScoreKey(row, col);
+        players = players.map((p) => {
+          if (p.uid !== user.uid) return p;
+          const streak = (p.streak || 0) + 1;
+          const solvedCount = (p.solvedCount || 0) + 1;
+          const earned = pointsForPlacement(
+            board,
+            puzzle,
+            solution,
+            row,
+            col,
+            streak
           );
-          const attack = createAttack(
-            attackType,
-            opponent.uid,
-            user.uid,
-            targetRow,
-            targetCol
-          );
-          const resolved = resolveIncomingAttack(players, attacks, attack);
-          players = resolved.players.map((p) =>
-            p.uid === user.uid
-              ? { ...p, attackUses: incrementAttackUse(p, attackType) }
-              : p
-          );
-          attacks = resolved.attacks;
-          autoAttack = {
-            type: attackType,
-            label: ATTACK_LABELS[attackType]?.title || attackType,
+          const creditGain = shouldEarnAttackCredit(solvedCount) ? 1 : 0;
+          pointsEarned = earned;
+          attackCreditEarned = creditGain > 0;
+          nextStreak = streak;
+          return {
+            ...p,
+            solvedCount,
+            streak,
+            score: (p.score || 0) + earned,
+            attackCredits: (p.attackCredits || 0) + creditGain,
+            placementScores: { ...p.placementScores, [key]: earned },
           };
-          autoAttackAbsorbed = resolved.absorbed;
-        }
+        });
+      } else if (wasCleared) {
+        const key = placementScoreKey(row, col);
+        players = players.map((p) => {
+          if (p.uid !== user.uid) return p;
+          const solvedBefore = p.solvedCount || 0;
+          const hadScoredPlacement = Object.prototype.hasOwnProperty.call(
+            p.placementScores || {},
+            key
+          );
+          const refund = hadScoredPlacement ? p.placementScores[key] || 0 : 0;
+          const nextScores = { ...p.placementScores };
+          delete nextScores[key];
+          // Only reverse streak/credits for placements that awarded them (not hints).
+          const revokeCredit =
+            hadScoredPlacement && shouldEarnAttackCredit(solvedBefore) ? 1 : 0;
+          const nextPlayerStreak = hadScoredPlacement
+            ? Math.max(0, (p.streak || 0) - 1)
+            : p.streak || 0;
+          nextStreak = nextPlayerStreak;
+          return {
+            ...p,
+            solvedCount: Math.max(0, solvedBefore - 1),
+            streak: nextPlayerStreak,
+            score: Math.max(0, (p.score || 0) - refund),
+            attackCredits: Math.max(0, (p.attackCredits || 0) - revokeCredit),
+            placementScores: nextScores,
+          };
+        });
       }
+
+      const attacks = pruneExpiredAttacks(data.attacks);
 
       const lastMoves = { ...(data.lastMoves || {}) };
-      lastMoves[user.uid] = { row, col, previous, value, fromHint: false };
+      lastMoves[user.uid] = {
+        row,
+        col,
+        previous,
+        value,
+        fromHint: false,
+        pointsEarned,
+        attackCreditEarned,
+      };
 
       const updates = {
         boards: flattenBoards(boards),
@@ -419,10 +462,12 @@ export class GameService {
       tx.update(docRef, updates);
       return {
         wasCorrect,
+        streakBroken: false,
+        streak: nextStreak,
+        pointsEarned,
+        attackCreditEarned,
         winner: updates.winner === user.uid,
         fromHint: false,
-        autoAttack,
-        autoAttackAbsorbed,
         waitingForOpponent: completion.waitingForOpponent,
         boardCompleted: Boolean(completion.players.find((p) => p.uid === user.uid)?.boardCompleted),
       };
@@ -527,7 +572,8 @@ export class GameService {
       const lastMove = data.lastMoves?.[user.uid];
       if (!lastMove) throw new Error("No hay movimiento para deshacer");
 
-      const { row, col, previous, value, fromHint } = lastMove;
+      const { row, col, previous, value, fromHint, pointsEarned = 0, attackCreditEarned = false } =
+        lastMove;
       const boards = { ...data.boards };
       const board = boards[user.uid].map((r) => [...r]);
 
@@ -543,22 +589,42 @@ export class GameService {
       const wasCleared =
         value === 0 && previous !== 0 && previous === solution[row][col];
 
-      let players = data.players.map((p) => ({ ...p }));
+      let players = data.players.map((p) => ({
+        ...p,
+        placementScores: { ...(p.placementScores || {}) },
+      }));
       if (wasCorrect) {
+        const key = placementScoreKey(row, col);
+        players = players.map((p) => {
+          if (p.uid !== user.uid) return p;
+          const nextScores = { ...p.placementScores };
+          const refund = fromHint ? 0 : nextScores[key] ?? pointsEarned;
+          delete nextScores[key];
+          return {
+            ...p,
+            solvedCount: Math.max(0, (p.solvedCount || 0) - 1),
+            // Hints never advance streak / score / attack credits.
+            streak: fromHint ? p.streak || 0 : Math.max(0, (p.streak || 0) - 1),
+            score: Math.max(0, (p.score || 0) - refund),
+            attackCredits: fromHint
+              ? p.attackCredits || 0
+              : Math.max(0, (p.attackCredits || 0) - (attackCreditEarned ? 1 : 0)),
+            placementScores: nextScores,
+            hintsUsed: fromHint
+              ? Math.max(0, (p.hintsUsed || 0) - 1)
+              : p.hintsUsed || 0,
+          };
+        });
+      } else if (wasCleared) {
+        // Undoing a clear restores the previous correct fill without re-scoring.
         players = players.map((p) =>
           p.uid === user.uid
             ? {
                 ...p,
-                solvedCount: Math.max(0, (p.solvedCount || 0) - 1),
-                hintsUsed: fromHint
-                  ? Math.max(0, (p.hintsUsed || 0) - 1)
-                  : p.hintsUsed || 0,
+                solvedCount: (p.solvedCount || 0) + 1,
+                streak: (p.streak || 0) + 1,
               }
             : p
-        );
-      } else if (wasCleared) {
-        players = players.map((p) =>
-          p.uid === user.uid ? { ...p, solvedCount: (p.solvedCount || 0) + 1 } : p
         );
       }
 
@@ -576,7 +642,11 @@ export class GameService {
     });
   }
 
-  async launchAttack(roomId, attackType, targetRow = null, targetCol = null, { paid = false } = {}) {
+  /**
+   * Spend one attack credit to launch a chosen attack (no point cost).
+   * Target is picked randomly with the existing attack logic.
+   */
+  async launchAttack(roomId, attackType, targetRow = null, targetCol = null, { useCredit = false } = {}) {
     const user = getCurrentUser();
     const docRef = this.db.collection(ROOMS).doc(roomId);
 
@@ -607,11 +677,9 @@ export class GameService {
         throw new Error(`Máximo ${attackLimit} usos de este ataque`);
       }
 
-      const cost = paid ? ATTACK_COSTS[attackType] || 0 : 0;
-      if (paid) {
-        if (!cost) throw new Error("Ataque no disponible");
-        if (playerScore(me) < cost) {
-          throw new Error(`Necesitas ${cost} pts para este ataque`);
+      if (useCredit) {
+        if ((me.attackCredits || 0) < 1) {
+          throw new Error("Necesitas un crédito de ataque (cada 5 aciertos)");
         }
       }
 
@@ -635,7 +703,9 @@ export class GameService {
         return {
           ...p,
           attackUses: incrementAttackUse(p, attackType),
-          pointsSpent: (p.pointsSpent || 0) + cost,
+          attackCredits: useCredit
+            ? Math.max(0, (p.attackCredits || 0) - 1)
+            : p.attackCredits || 0,
         };
       });
       attacks = resolved.attacks;
@@ -649,8 +719,9 @@ export class GameService {
       return {
         attack,
         absorbed: resolved.absorbed,
-        cost,
+        cost: 0,
         label: ATTACK_LABELS[attackType]?.title || attackType,
+        attackCredits: Math.max(0, (me.attackCredits || 0) - (useCredit ? 1 : 0)),
       };
     });
   }
@@ -705,7 +776,11 @@ export class GameService {
   }
 
   async buyAttack(roomId, attackType) {
-    return this.launchAttack(roomId, attackType, null, null, { paid: true });
+    return this.addAttack(roomId, attackType);
+  }
+
+  async addAttack(roomId, attackType) {
+    return this.launchAttack(roomId, attackType, null, null, { useCredit: true });
   }
 
   async leaveRoom(roomId) {

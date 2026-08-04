@@ -5,17 +5,13 @@ export const ATTACK_TYPES = {
 };
 
 export const MAX_ATTACK_USES = 3;
-export const AUTO_ATTACK_EVERY = 5;
+/** Every N correct placements grants 1 attack credit to choose and launch. */
+export const ATTACK_CREDIT_EVERY = 5;
+export const AUTO_ATTACK_EVERY = ATTACK_CREDIT_EVERY;
 export const ATTACK_REGEN_INTERVAL_MS = 3 * 60 * 1000;
 export const ATTACK_REGEN_AMOUNT = 2;
 export const MAX_DEFENSE_BUYS = 3;
 export const DEFENSE_COST = 5;
-
-export const ATTACK_COSTS = {
-  [ATTACK_TYPES.FREEZE_INPUT]: 8,
-  [ATTACK_TYPES.BLOCK_LINE]: 5,
-  [ATTACK_TYPES.BLOCK_CELL]: 3,
-};
 
 export const ATTACK_DURATIONS = {
   [ATTACK_TYPES.FREEZE_INPUT]: 4000,
@@ -95,8 +91,14 @@ export function getAttackRegenInfo(startedAt, now = Date.now()) {
   };
 }
 
+/** True when reaching this solvedCount grants a new attack credit. */
+export function shouldEarnAttackCredit(solvedCount) {
+  return solvedCount > 0 && solvedCount % ATTACK_CREDIT_EVERY === 0;
+}
+
+/** @deprecated Use shouldEarnAttackCredit — kept for naming clarity in call sites. */
 export function shouldTriggerAutoAttack(solvedCount) {
-  return solvedCount > 0 && solvedCount % AUTO_ATTACK_EVERY === 0;
+  return shouldEarnAttackCredit(solvedCount);
 }
 
 export function canUseAttackType(player, type, limit = MAX_ATTACK_USES) {

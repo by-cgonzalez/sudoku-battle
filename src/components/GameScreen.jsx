@@ -5,10 +5,9 @@ import { getDifficulty } from "../lib/difficulty";
 import {
   ATTACK_TYPES,
   ATTACK_LABELS,
-  ATTACK_COSTS,
   DEFENSE_COST,
   MAX_DEFENSE_BUYS,
-  AUTO_ATTACK_EVERY,
+  ATTACK_CREDIT_EVERY,
   ATTACK_REGEN_AMOUNT,
   isInputFrozen,
   getActiveAttacks,
@@ -29,6 +28,7 @@ import {
   normalizeGameOptions,
   playerScore,
   startedAtMs,
+  streakMultiplier,
   toggleNoteValue,
 } from "../lib/features";
 import {
@@ -98,19 +98,33 @@ export function GameScreen() {
       setSelectedCell(cell);
       setStatus({ message: "", type: "" });
       const result = await gameService.placeNumber(room.id, row, col, value);
+
+      if (result.streakBroken) {
+        setMistakes((n) => n + 1);
+        setStatus({ message: "Número incorrecto — racha reiniciada", type: "error" });
+        setWrongCell({ row, col });
+        setTimeout(() => setWrongCell(null), 500);
+        return;
+      }
+
       setNotes((prev) => clearCellNotes(prev, row, col));
       if (result.waitingForOpponent) {
         setStatus({
           message: "¡Tablero completo! Esperando a que el rival termine…",
           type: "",
         });
-      } else if (result.wasCorrect && result.autoAttack) {
-        setStatus({
-          message: result.autoAttackAbsorbed
-            ? `${result.autoAttack.label} bloqueado por la defensa rival`
-            : `Ataque auto: ${result.autoAttack.label}`,
-          type: "",
-        });
+      } else if (result.wasCorrect) {
+        const parts = [];
+        if (result.pointsEarned > 0) parts.push(`+${result.pointsEarned} pts`);
+        if (result.streak >= 5) {
+          parts.push(`racha ×${streakMultiplier(result.streak)}`);
+        }
+        if (result.attackCreditEarned) {
+          parts.push(`crédito de ataque listo`);
+        }
+        if (parts.length > 0) {
+          setStatus({ message: parts.join(" · "), type: "" });
+        }
       }
     } catch (err) {
       const msg = err.message || "";
@@ -180,15 +194,15 @@ export function GameScreen() {
     }
   }, [room, finished, boardDone, shopBusy, gameService]);
 
-  const handleBuyAttack = useCallback(async (type) => {
+  const handleAddAttack = useCallback(async (type) => {
     if (!room || finished || boardDone || shopBusy) return;
     try {
       setShopBusy(true);
-      const result = await gameService.buyAttack(room.id, type);
+      const result = await gameService.addAttack(room.id, type);
       setStatus({
         message: result.absorbed
-          ? `${result.label} comprado (−${result.cost} pts) pero bloqueado por defensa`
-          : `${result.label} lanzado (−${result.cost} pts)`,
+          ? `${result.label} agregado pero bloqueado por defensa`
+          : `${result.label} lanzado`,
         type: "",
       });
     } catch (err) {
@@ -250,6 +264,9 @@ export function GameScreen() {
     !boardDone &&
     (me?.defensesBought || 0) < MAX_DEFENSE_BUYS &&
     myScore >= DEFENSE_COST;
+  const attackCredits = me?.attackCredits || 0;
+  const myStreak = me?.streak || 0;
+  const myStreakMult = streakMultiplier(myStreak);
 
   const shortcuts = [
     "1-9",
@@ -278,8 +295,8 @@ export function GameScreen() {
     <div className="attack-info card-small combat-panel">
       <h3>⚔️ Combate</h3>
       <p>
-        Auto-ataque cada {AUTO_ATTACK_EVERY} aciertos. Cada 3 min +{ATTACK_REGEN_AMOUNT} usos
-        por tipo.
+        Cada {ATTACK_CREDIT_EVERY} aciertos ganas 1 crédito para agregar un ataque a elección
+        (se lanza al agregarlo). Cada 3 min +{ATTACK_REGEN_AMOUNT} usos por tipo.
       </p>
       <ul>
         <li><strong>Congelar</strong> — 4 seg</li>
@@ -287,10 +304,13 @@ export function GameScreen() {
         <li><strong>Bloquear celda</strong> — 10 seg</li>
       </ul>
       <p className="shop-meta attack-regen-meta">
-        Límite {attackLimit}/tipo · +{ATTACK_REGEN_AMOUNT} en {regenLabel}
+        Créditos {attackCredits} · Límite {attackLimit}/tipo · +{ATTACK_REGEN_AMOUNT} en {regenLabel}
       </p>
       <p className="shop-meta">
-        Escudos: {me?.defenseCharges || 0} · Usos: ❄️{getAttackUses(me, ATTACK_TYPES.FREEZE_INPUT)}/{attackLimit}
+        Racha {myStreak}
+        {myStreakMult > 1 ? ` (×${myStreakMult})` : ""}
+        {" · "}Escudos: {me?.defenseCharges || 0}
+        {" · "}Usos: ❄️{getAttackUses(me, ATTACK_TYPES.FREEZE_INPUT)}/{attackLimit}
         {" · "}➖{getAttackUses(me, ATTACK_TYPES.BLOCK_LINE)}/{attackLimit}
         {" · "}🚫{getAttackUses(me, ATTACK_TYPES.BLOCK_CELL)}/{attackLimit}
       </p>
@@ -299,7 +319,13 @@ export function GameScreen() {
 
   const shopPanel = (
     <div className="attack-shop card-small shop-panel">
-      <h3>🛒 Tienda</h3>
+      <h3>🛒 Ataques y defensa</h3>
+      <p className="shop-meta">
+        Créditos de ataque: <strong>{attackCredits}</strong>
+        {attackCredits < 1
+          ? ` · consigue 1 cada ${ATTACK_CREDIT_EVERY} aciertos`
+          : " · elige un ataque para lanzarlo"}
+      </p>
       <div className="shop-row">
         <div className="shop-item-info">
           <span className="shop-item-title">🛡️ Defensa</span>
@@ -319,14 +345,13 @@ export function GameScreen() {
       </div>
       {Object.values(ATTACK_TYPES).map((type) => {
         const info = ATTACK_LABELS[type];
-        const cost = ATTACK_COSTS[type];
         const uses = getAttackUses(me, type);
-        const canBuy =
+        const canAdd =
           !finished &&
           !boardDone &&
           !opponent?.boardCompleted &&
           canUseAttackType(me, type, attackLimit) &&
-          myScore >= cost &&
+          attackCredits >= 1 &&
           !shopBusy;
         return (
           <div key={type} className="shop-row">
@@ -335,17 +360,17 @@ export function GameScreen() {
                 {info.icon} {info.title}
               </span>
               <span className="shop-item-meta">
-                −{cost} pts · {uses}/{attackLimit}
+                1 crédito · {uses}/{attackLimit}
               </span>
             </div>
             <button
               type="button"
               className="shop-buy-btn"
-              disabled={!canBuy}
-              onClick={() => handleBuyAttack(type)}
-              title={`Comprar ${info.title} (−${cost} pts)`}
+              disabled={!canAdd}
+              onClick={() => handleAddAttack(type)}
+              title={`Agregar ${info.title} (1 crédito)`}
             >
-              Comprar
+              Agregar
             </button>
           </div>
         );
@@ -484,6 +509,7 @@ export function GameScreen() {
               aria-expanded={extrasOpen}
             >
               {extrasOpen ? "▾" : "▸"} Tienda y combate
+              {attackCredits > 0 ? ` · ⚔️${attackCredits}` : ""}
               {(me?.defenseCharges || 0) > 0 ? ` · 🛡️${me.defenseCharges}` : ""}
             </button>
             {extrasOpen && <div className="mobile-extras-body">{extrasBlock}</div>}

@@ -6,10 +6,33 @@
       "**/.*",
       "**/node_modules/**"
     ],
+    "predeploy": [
+      "bash -c 'CI=true pnpm exec vite build'"
+    ],
     "rewrites": [
       {
         "source": "**",
         "destination": "/index.html"
+      }
+    ],
+    "headers": [
+      {
+        "source": "/index.html",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "no-cache"
+          }
+        ]
+      },
+      {
+        "source": "/assets/**",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public,max-age=31536000,immutable"
+          }
+        ]
       }
     ]
   },

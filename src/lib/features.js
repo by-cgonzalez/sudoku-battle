@@ -3,6 +3,17 @@ import { SIZE } from "./sudoku";
 export const HINT_COST = 3;
 export const MAX_HINTS = 3;
 
+export const POINTS_PER_HIT = 2;
+export const POINTS_PER_LINE = 5;
+export const POINTS_PER_BLOCK = 10;
+
+/** Streak thresholds → point multipliers (consecutive correct placements). */
+export const STREAK_MULTIPLIERS = [
+  { min: 15, mult: 3 },
+  { min: 10, mult: 2 },
+  { min: 5, mult: 1.5 },
+];
+
 export const BOARD_SIZES = {
   sm: { id: "sm", label: "S", px: 340 },
   md: { id: "md", label: "M", px: 440 },
@@ -32,7 +43,7 @@ export const GAME_OPTIONS = {
   hints: {
     id: "hints",
     label: "Hint",
-    desc: `Rellena la celda (−${HINT_COST} pts; máx. ${MAX_HINTS}; requiere puntos; no da ataque)`,
+    desc: `Rellena la celda (−${HINT_COST} pts; máx. ${MAX_HINTS}; requiere puntos; no da ataque ni racha)`,
     icon: "💡",
   },
   notes: {
@@ -75,12 +86,65 @@ export function normalizeGameOptions(options = {}) {
   };
 }
 
+export function streakMultiplier(streak) {
+  const n = streak || 0;
+  for (const { min, mult } of STREAK_MULTIPLIERS) {
+    if (n >= min) return mult;
+  }
+  return 1;
+}
+
+function cellValue(board, puzzle, row, col) {
+  return puzzle[row][col] !== 0 ? puzzle[row][col] : board[row][col];
+}
+
+function isUnitSolved(board, puzzle, solution, cells) {
+  return cells.every(({ r, c }) => cellValue(board, puzzle, r, c) === solution[r][c]);
+}
+
+/** Bonuses unlocked by completing the row/col/block that contain (row, col). */
+export function completionBonuses(board, puzzle, solution, row, col) {
+  let bonus = 0;
+
+  const rowCells = Array.from({ length: SIZE }, (_, c) => ({ r: row, c }));
+  if (isUnitSolved(board, puzzle, solution, rowCells)) bonus += POINTS_PER_LINE;
+
+  const colCells = Array.from({ length: SIZE }, (_, r) => ({ r, c: col }));
+  if (isUnitSolved(board, puzzle, solution, colCells)) bonus += POINTS_PER_LINE;
+
+  const br = Math.floor(row / 3) * 3;
+  const bc = Math.floor(col / 3) * 3;
+  const boxCells = [];
+  for (let r = br; r < br + 3; r++) {
+    for (let c = bc; c < bc + 3; c++) boxCells.push({ r, c });
+  }
+  if (isUnitSolved(board, puzzle, solution, boxCells)) bonus += POINTS_PER_BLOCK;
+
+  return bonus;
+}
+
+/**
+ * Points for a correct placement after `nextStreak` consecutive aciertos.
+ * Multiplier applies to the full award (hit + line/block bonuses).
+ */
+export function pointsForPlacement(board, puzzle, solution, row, col, nextStreak) {
+  const base = POINTS_PER_HIT + completionBonuses(board, puzzle, solution, row, col);
+  const mult = streakMultiplier(nextStreak);
+  return Math.round(base * mult);
+}
+
+export function placementScoreKey(row, col) {
+  return `${row}-${col}`;
+}
+
 export function playerScore(player) {
   if (!player) return 0;
-  const solved = player.solvedCount || 0;
   const hints = player.hintsUsed || 0;
   const spent = player.pointsSpent || 0;
-  return Math.max(0, solved - HINT_COST * hints - spent);
+  // Versus: accumulated match score. Solo/legacy: 1 pt per solved cell.
+  const earned =
+    typeof player.score === "number" ? player.score : player.solvedCount || 0;
+  return Math.max(0, earned - HINT_COST * hints - spent);
 }
 
 export function canUseHint(player) {
