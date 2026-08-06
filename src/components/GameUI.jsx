@@ -54,6 +54,7 @@ export function SudokuBoard({
   highlight = true,
   conflictCells = null,
   celebrateCells = null,
+  zoneTints = null,
   boardSize = DEFAULT_BOARD_SIZE,
 }) {
   const sizePx = getBoardSize(boardSize).px;
@@ -85,6 +86,7 @@ export function SudokuBoard({
             const wrong = wrongCell?.row === r && wrongCell?.col === c;
             const inConflict = conflictCells?.has(notesKey(r, c));
             const celebrating = celebrateCells?.has(notesKey(r, c));
+            const zoneTint = zoneTints?.get?.(notesKey(r, c)) || null;
             const cellNotes = !value ? notes[notesKey(r, c)] || [] : [];
             const related =
               highlight &&
@@ -107,6 +109,7 @@ export function SudokuBoard({
               wrong && "wrong",
               inConflict && "conflict",
               celebrating && "celebrate",
+              zoneTint && "zone-owned",
               related && "related",
               sameNumber && "same-number",
               digitComplete && "digit-complete",
@@ -124,6 +127,7 @@ export function SudokuBoard({
                 key={`${r}-${c}`}
                 type="button"
                 className={classes}
+                style={zoneTint ? { "--zone-tint": zoneTint } : undefined}
                 disabled={blocked}
                 onClick={wrapClick(() => onCellClick(r, c, fixed, blocked))}
                 {...touch}
@@ -411,53 +415,52 @@ export function ScorePanel({
   opponent,
   battleMode = "race",
   mistakes = 0,
-  pointsGain = null,
-  scorePulse = false,
+  myZones = 0,
+  oppZones = 0,
 }) {
   const mode = getBattleMode(battleMode);
   const myScore = playerScore(me);
   const oppScore = playerScore(opponent);
   const mySolved = me?.solvedCount || 0;
   const oppSolved = opponent?.solvedCount || 0;
-  const myValue = battleMode === "score" ? myScore : mySolved;
-  const oppValue = battleMode === "score" ? oppScore : oppSolved;
+  const myValue =
+    battleMode === "zones"
+      ? myZones
+      : battleMode === "score"
+        ? myScore
+        : mySolved;
+  const oppValue =
+    battleMode === "zones"
+      ? oppZones
+      : battleMode === "score"
+        ? oppScore
+        : oppSolved;
   const iLead = myValue > oppValue;
   const oppLeads = oppValue > myValue;
-  const unit = battleMode === "score" ? "pts" : "aciertos";
+  const unit =
+    battleMode === "zones" ? "zonas" : battleMode === "score" ? "pts" : "aciertos";
   const oppName = opponent?.name?.split(" ")[0] || "Rival";
 
   return (
     <div className="score-panel score-panel-minimal" title={mode.desc}>
       <div
-        className={`score-side me ${iLead ? "leading" : ""} ${me?.boardCompleted ? "done" : ""} ${scorePulse ? "score-pulse" : ""}`}
+        className={`score-side me ${iLead ? "leading" : ""} ${me?.boardCompleted ? "done" : ""}`}
       >
         <div className="score-identity">
           {iLead && <span className="score-crown" aria-hidden="true">👑</span>}
           <span className="score-name">Tú{me?.boardCompleted ? " ✓" : ""}</span>
         </div>
-        <strong className="score-num">
-          {myValue}
-          {pointsGain != null && pointsGain > 0 && (
-            <span className="score-float" key={pointsGain.id || pointsGain.total}>
-              +{pointsGain.total}
-            </span>
-          )}
-        </strong>
-        <span className={`score-meta${scorePulse ? " score-meta-flash" : ""}`}>
-          {battleMode === "score" ? `${mySolved} aciertos` : `${myScore} pts`}
+        <strong className="score-num">{myValue}</strong>
+        <span className="score-meta">
+          {battleMode === "zones"
+            ? `${myScore} pts · ${mySolved} aciertos`
+            : battleMode === "score"
+              ? `${mySolved} aciertos`
+              : `${myScore} pts`}
           {(me?.streak || 0) >= 5 ? ` · racha ${me.streak}` : ""}
           {" · "}
           {mistakes}✗
         </span>
-        {pointsGain?.labels?.length > 0 && (
-          <div className="score-gain-chips" key={`chips-${pointsGain.id}`}>
-            {pointsGain.labels.map((label) => (
-              <span key={label} className="score-gain-chip">
-                {label}
-              </span>
-            ))}
-          </div>
-        )}
       </div>
       <div className="score-center">
         <span className="vs-badge">VS</span>
@@ -473,8 +476,133 @@ export function ScorePanel({
         </div>
         <strong className="score-num">{oppValue}</strong>
         <span className="score-meta">
-          {battleMode === "score" ? `${oppSolved} aciertos` : `${oppScore} pts`}
+          {battleMode === "zones"
+            ? `${oppScore} pts · ${oppSolved} aciertos`
+            : battleMode === "score"
+              ? `${oppSolved} aciertos`
+              : `${oppScore} pts`}
         </span>
+      </div>
+    </div>
+  );
+}
+
+export function StreakRail({ streak = 0, multiplier = 1 }) {
+  const hot = streak >= 5;
+  const blazing = streak >= 10;
+  const inferno = streak >= 15;
+  const level = inferno ? "inferno" : blazing ? "blazing" : hot ? "hot" : "idle";
+
+  return (
+    <div className={`streak-rail streak-${level}`} title="Racha de aciertos">
+      <div className="streak-fire" aria-hidden="true">
+        <span className="flame f1">🔥</span>
+        <span className="flame f2">🔥</span>
+        <span className="flame f3">🔥</span>
+      </div>
+      <div className="streak-body">
+        <span className="streak-label">Racha</span>
+        <strong className="streak-count">{streak}</strong>
+        <span className={`streak-mult${multiplier > 1 ? " active" : ""}`}>
+          ×{multiplier}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+export function PointsRail({ pointsGain = null }) {
+  return (
+    <div className="points-rail" aria-live="polite">
+      <span className="points-rail-label">Puntos</span>
+      {pointsGain ? (
+        <div className="points-rail-burst" key={pointsGain.id}>
+          <strong className="points-rail-total">+{pointsGain.total}</strong>
+          <div className="points-rail-chips">
+            {(pointsGain.labels || []).map((label) => (
+              <span key={label} className="points-rail-chip">
+                {label}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <span className="points-rail-idle">—</span>
+      )}
+    </div>
+  );
+}
+
+export function ZonesMap({
+  zones,
+  meUid,
+  oppUid,
+  myColor,
+  oppColor,
+  threshold = 5,
+}) {
+  const cells = Array.from({ length: 9 }, (_, i) => {
+    const owner = zones?.[i] ?? zones?.[String(i)] ?? null;
+    const mine = owner === meUid;
+    const theirs = owner === oppUid;
+    return { i, owner, mine, theirs };
+  });
+  const myCount = cells.filter((c) => c.mine).length;
+  const oppCount = cells.filter((c) => c.theirs).length;
+
+  return (
+    <div className="zones-map card-small">
+      <div className="zones-map-header">
+        <strong>Zonas</strong>
+        <span>
+          {myCount}–{oppCount}
+          <span className="zones-map-goal"> / {threshold}</span>
+        </span>
+      </div>
+      <div className="zones-grid" aria-label="Mapa de zonas">
+        {cells.map(({ i, mine, theirs }) => (
+          <div
+            key={i}
+            className={`zones-cell${mine ? " mine" : ""}${theirs ? " theirs" : ""}`}
+            style={{
+              "--zone-color": mine ? myColor : theirs ? oppColor : "transparent",
+            }}
+            title={mine ? "Tuya" : theirs ? "Rival" : "Libre"}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function CaptureColorPicker({
+  colors,
+  selectedId,
+  takenIds = [],
+  onSelect,
+  disabled = false,
+  title = "Color de captura",
+}) {
+  return (
+    <div className="capture-color-picker">
+      <h3>{title}</h3>
+      <div className="capture-color-row" role="group" aria-label={title}>
+        {colors.map((c) => {
+          const taken = takenIds.includes(c.id) && c.id !== selectedId;
+          return (
+            <button
+              key={c.id}
+              type="button"
+              className={`capture-swatch${selectedId === c.id ? " selected" : ""}`}
+              style={{ "--swatch": c.hex }}
+              disabled={disabled || taken}
+              title={taken ? `${c.label} (ocupado)` : c.label}
+              onClick={() => onSelect?.(c.id)}
+            >
+              <span className="sr-only">{c.label}</span>
+            </button>
+          );
+        })}
       </div>
     </div>
   );

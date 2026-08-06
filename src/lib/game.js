@@ -32,6 +32,17 @@ import {
   playerScore,
   scorePlacementDetails,
 } from "./features";
+import {
+  CAPTURE_COLORS,
+  DEFAULT_CAPTURE_COLOR,
+  ZONE_WIN_THRESHOLD,
+  countZonesFor,
+  emptyZones,
+  getCaptureColor,
+  normalizeZones,
+  resolveZonesWinner,
+  tryCaptureZone,
+} from "./zones";
 import { db, firebase } from "./firebase";
 
 const MAX_PLAYERS = 2;
@@ -48,7 +59,7 @@ function generateRoomCode() {
   return code;
 }
 
-function playerPayload(user) {
+function playerPayload(user, captureColor = DEFAULT_CAPTURE_COLOR) {
   return {
     uid: user.uid,
     name: getUserDisplayName(user),
@@ -64,6 +75,7 @@ function playerPayload(user) {
     defenseCharges: 0,
     defensesBought: 0,
     attackUses: emptyAttackUses(),
+    captureColor: getCaptureColor(captureColor).id,
   };
 }
 
@@ -101,7 +113,11 @@ function allPlayersBoardCompleted(players) {
   );
 }
 
-function resolveWinner(players, completerUid, battleMode) {
+function resolveWinner(players, completerUid, battleMode, zones = null) {
+  if (battleMode === "zones") {
+    return resolveZonesWinner(players, zones);
+  }
+
   if (battleMode === "score") {
     const ranked = [...players].sort((a, b) => {
       const scoreDiff = playerScore(b) - playerScore(a);
@@ -122,8 +138,17 @@ function resolveWinner(players, completerUid, battleMode) {
   };
 }
 
-/** Ends race immediately; score waits until every player finished their board. */
-function applyBoardCompletion(updates, players, board, solution, puzzle, battleMode, completerUid) {
+/** Ends race immediately; score/zones wait until every player finished their board. */
+function applyBoardCompletion(
+  updates,
+  players,
+  board,
+  solution,
+  puzzle,
+  battleMode,
+  completerUid,
+  zones = null
+) {
   if (!isBoardComplete(board, solution, puzzle)) {
     return { players, matchFinished: false, waitingForOpponent: false };
   }
@@ -131,19 +156,33 @@ function applyBoardCompletion(updates, players, board, solution, puzzle, battleM
   let nextPlayers = markPlayerBoardCompleted(players, completerUid);
   updates.players = nextPlayers;
 
-  if (battleMode === "score") {
+  if (battleMode === "score" || battleMode === "zones") {
     if (!allPlayersBoardCompleted(nextPlayers)) {
       return { players: nextPlayers, matchFinished: false, waitingForOpponent: true };
     }
   }
 
-  const result = resolveWinner(nextPlayers, completerUid, battleMode || "race");
+  const result = resolveWinner(
+    nextPlayers,
+    completerUid,
+    battleMode || "race",
+    zones ?? updates.zones
+  );
   updates.winner = result.winner;
   updates.winnerName = result.winnerName;
   updates.status = "finished";
   updates.finishedAt = FieldValue.serverTimestamp();
   updates.finishedBy = completerUid;
   return { players: nextPlayers, matchFinished: true, waitingForOpponent: false };
+}
+
+function finishMatch(updates, players, winnerUid, winnerName) {
+  updates.players = players;
+  updates.winner = winnerUid;
+  updates.winnerName = winnerName;
+  updates.status = "finished";
+  updates.finishedAt = FieldValue.serverTimestamp();
+  updates.finishedBy = winnerUid;
 }
 
 export class GameService {
@@ -163,7 +202,7 @@ export class GameService {
 
     const difficulty = getDifficulty(difficultyId);
     const battleMode = getBattleMode(battleModeId);
-    const gameOptions = normalizeGameOptions(options);
+    const gameOptions = normalizeGameOptions(options, battleMode.id);
     const { puzzle, solution } = generateSudoku(difficulty.cellsToRemove);
     const code = generateRoomCode();
 
@@ -178,7 +217,7 @@ export class GameService {
       battleModeLabel: battleMode.label,
       options: gameOptions,
       playerUids: [user.uid],
-      players: [playerPayload(user)],
+      players: [playerPayload(user, DEFAULT_CAPTURE_COLOR)],
       puzzle: flattenGrid(puzzle),
       solution: flattenGrid(solution),
       rankingProcessed: [],
@@ -186,6 +225,7 @@ export class GameService {
       boards: flattenBoards({ [user.uid]: emptyPlayerBoard(puzzle) }),
       lastMoves: {},
       attacks: [],
+      zones: emptyZones(),
       winner: null,
       winnerName: null,
       createdAt: FieldValue.serverTimestamp(),
@@ -242,7 +282,14 @@ export class GameService {
         return { roomId, code: data.code };
       }
 
-      const updatedPlayers = [...data.players, playerPayload(user)];
+      const takenColors = new Set(
+        data.players.map((p) => p.captureColor || DEFAULT_CAPTURE_COLOR)
+      );
+      const freeColor =
+        CAPTURE_COLORS.find((c) => !takenColors.has(c.id))?.id ||
+        CAPTURE_COLORS[1].id;
+
+      const updatedPlayers = [...data.players, playerPayload(user, freeColor)];
       const boards = {
         ...data.boards,
         [user.uid]: emptyPlayerBoard(data.puzzle),
@@ -252,6 +299,7 @@ export class GameService {
         players: updatedPlayers,
         playerUids: updatedPlayers.map((p) => p.uid),
         boards: flattenBoards(boards),
+        zones: normalizeZones(data.zones),
         updatedAt: FieldValue.serverTimestamp(),
       });
 
@@ -272,15 +320,61 @@ export class GameService {
     if (data.hostId !== user.uid) throw new Error("Solo el anfitri?n puede iniciar");
     if (data.players.length < 2) throw new Error("Se necesitan 2 jugadores");
 
+    const battleMode = data.battleMode || "race";
+    const options = normalizeGameOptions(data.options, battleMode);
+
     await docRef.update({
       status: "playing",
       startedAt: FieldValue.serverTimestamp(),
+      options,
+      zones: normalizeZones(data.zones),
       updatedAt: FieldValue.serverTimestamp(),
     });
 
     if (data.code) {
       await this.db.collection(ROOM_CODES).doc(data.code).update({ status: "playing" });
     }
+  }
+
+  /** Any player can pick their capture color while waiting. */
+  async updateCaptureColor(roomId, colorId) {
+    const user = getCurrentUser();
+    const docRef = this.db.collection(ROOMS).doc(roomId);
+    const color = getCaptureColor(colorId);
+
+    // Fast path: single read + update (color picks are low-conflict in waiting room).
+    const roomSnap = await docRef.get();
+    if (!roomSnap.exists) throw new Error("Sala no encontrada");
+
+    const data = parseRoomData(roomSnap.data());
+    if (data.status !== "waiting") {
+      throw new Error("Solo se puede cambiar el color en la sala de espera");
+    }
+
+    const me = data.players.find((p) => p.uid === user.uid);
+    if (!me) throw new Error("Jugador no encontrado");
+
+    if ((me.captureColor || DEFAULT_CAPTURE_COLOR) === color.id) {
+      return { captureColor: color.id };
+    }
+
+    const taken = data.players.some(
+      (p) => p.uid !== user.uid && (p.captureColor || DEFAULT_CAPTURE_COLOR) === color.id
+    );
+    if (taken) {
+      throw new Error("Ese color ya lo eligió el rival");
+    }
+
+    const players = data.players.map((p) =>
+      p.uid === user.uid ? { ...p, captureColor: color.id } : p
+    );
+
+    await docRef.update({
+      players,
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+
+    return { captureColor: color.id };
   }
 
   /** Host-only: change difficulty while waiting (regenerates the puzzle). */
@@ -318,6 +412,7 @@ export class GameService {
         solution: flattenGrid(solution),
         boards: flattenBoards(boards),
         lastMoves: {},
+        zones: emptyZones(),
         updatedAt: FieldValue.serverTimestamp(),
       });
 
@@ -414,6 +509,9 @@ export class GameService {
       let pointsBreakdown = null;
       let attackCreditEarned = false;
       let nextStreak = mePlayer?.streak || 0;
+      let zoneCaptured = null;
+      let zones = normalizeZones(data.zones);
+      const battleMode = data.battleMode || "race";
 
       if (wasCorrect) {
         const key = placementScoreKey(row, col);
@@ -444,6 +542,20 @@ export class GameService {
             placementScores: { ...p.placementScores, [key]: earned },
           };
         });
+
+        if (battleMode === "zones") {
+          const capture = tryCaptureZone(
+            zones,
+            board,
+            puzzle,
+            solution,
+            row,
+            col,
+            user.uid
+          );
+          zones = capture.zones;
+          zoneCaptured = capture.capturedIndex;
+        }
       } else if (wasCleared) {
         const key = placementScoreKey(row, col);
         players = players.map((p) => {
@@ -492,18 +604,33 @@ export class GameService {
         players,
         lastMoves,
         attacks,
+        zones,
         updatedAt: FieldValue.serverTimestamp(),
       };
 
-      const completion = applyBoardCompletion(
-        updates,
-        players,
-        board,
-        solution,
-        puzzle,
-        data.battleMode || "race",
-        user.uid
-      );
+      let zoneWin = false;
+      if (
+        battleMode === "zones" &&
+        zoneCaptured != null &&
+        countZonesFor(zones, user.uid) >= ZONE_WIN_THRESHOLD
+      ) {
+        const meNow = players.find((p) => p.uid === user.uid);
+        finishMatch(updates, players, user.uid, meNow?.name || "Jugador");
+        zoneWin = true;
+      }
+
+      const completion = zoneWin
+        ? { players, matchFinished: true, waitingForOpponent: false }
+        : applyBoardCompletion(
+            updates,
+            players,
+            board,
+            solution,
+            puzzle,
+            battleMode,
+            user.uid,
+            zones
+          );
 
       tx.update(docRef, updates);
       return {
@@ -513,10 +640,14 @@ export class GameService {
         pointsEarned,
         pointsBreakdown,
         attackCreditEarned,
+        zoneCaptured,
+        zonesOwned: countZonesFor(zones, user.uid),
         winner: updates.winner === user.uid,
         fromHint: false,
         waitingForOpponent: completion.waitingForOpponent,
-        boardCompleted: Boolean(completion.players.find((p) => p.uid === user.uid)?.boardCompleted),
+        boardCompleted: Boolean(
+          completion.players.find((p) => p.uid === user.uid)?.boardCompleted
+        ),
       };
     });
   }
@@ -536,6 +667,9 @@ export class GameService {
       const me = data.players.find((p) => p.uid === user.uid);
       if (me?.boardCompleted) {
         throw new Error("Ya completaste tu tablero. Espera al rival.");
+      }
+      if ((data.battleMode || "race") === "zones") {
+        throw new Error("Los hints no están disponibles en Guerra de zonas");
       }
 
       const puzzle = data.puzzle;
@@ -584,7 +718,8 @@ export class GameService {
         solution,
         puzzle,
         data.battleMode || "race",
-        user.uid
+        user.uid,
+        normalizeZones(data.zones)
       );
 
       tx.update(docRef, updates);

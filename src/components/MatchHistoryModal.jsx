@@ -67,9 +67,11 @@ export function MatchHistoryModal({ onClose }) {
               const diff = getDifficulty(match.difficulty);
               const battle = getBattleMode(match.battleMode);
               const scoreLabel =
-                match.battleMode === "score"
-                  ? `${match.myScore} – ${match.oppScore} pts`
-                  : `${match.mySolved} – ${match.oppSolved} aciertos`;
+                match.battleMode === "zones"
+                  ? `${match.myScore} – ${match.oppScore} zonas`
+                  : match.battleMode === "score"
+                    ? `${match.myScore} – ${match.oppScore} pts`
+                    : `${match.mySolved} – ${match.oppSolved} aciertos`;
 
               return (
                 <li

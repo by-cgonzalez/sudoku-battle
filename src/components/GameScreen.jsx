@@ -36,6 +36,14 @@ import {
   toggleNoteValue,
 } from "../lib/features";
 import {
+  DEFAULT_CAPTURE_COLOR,
+  ZONE_WIN_THRESHOLD,
+  countZonesFor,
+  getCaptureColor,
+  normalizeZones,
+  zoneCellKeys,
+} from "../lib/zones";
+import {
   SudokuBoard,
   Numpad,
   ScorePanel,
@@ -43,6 +51,9 @@ import {
   TimerDisplay,
   BoardSizePicker,
   MatchHud,
+  StreakRail,
+  PointsRail,
+  ZonesMap,
   getCompletedDigits,
 } from "./GameUI";
 import { useSudokuKeyboard } from "../hooks/useSudokuKeyboard";
@@ -73,10 +84,10 @@ export function GameScreen() {
   const [mistakes, setMistakes] = useState(0);
   const [extrasOpen, setExtrasOpen] = useState(false);
   const [pointsGain, setPointsGain] = useState(null);
-  const [scorePulse, setScorePulse] = useState(false);
   const [celebrateCells, setCelebrateCells] = useState(null);
 
-  const options = normalizeGameOptions(room?.options);
+  const options = normalizeGameOptions(room?.options, room?.battleMode);
+  const hintsEnabled = Boolean(options.hints) && room?.battleMode !== "zones";
   const me = room && user ? getMe(room) : null;
   const opponent = room && user ? getOpponent(room) : null;
   const attacks = room?.attacks || [];
@@ -89,9 +100,27 @@ export function GameScreen() {
   const won = room?.winner === user?.uid;
   const myScore = playerScore(me);
   const boardDone = Boolean(me?.boardCompleted);
+  const isZones = room?.battleMode === "zones";
   const waitingForOpponent =
-    room?.battleMode === "score" && boardDone && !finished;
+    (room?.battleMode === "score" || isZones) && boardDone && !finished;
   const inputLocked = frozen || finished || boardDone;
+  const zones = normalizeZones(room?.zones);
+  const myZones = user ? countZonesFor(zones, user.uid) : 0;
+  const oppZones = opponent ? countZonesFor(zones, opponent.uid) : 0;
+  const myCapture = getCaptureColor(me?.captureColor || DEFAULT_CAPTURE_COLOR);
+  const oppCapture = getCaptureColor(opponent?.captureColor || DEFAULT_CAPTURE_COLOR);
+  const myStreak = me?.streak || 0;
+  const myStreakMult = streakMultiplier(myStreak);
+
+  const zoneTints = useMemo(() => {
+    if (!isZones || !user) return null;
+    const map = new Map();
+    for (let i = 0; i < 9; i++) {
+      if (zones[i] !== user.uid) continue;
+      for (const key of zoneCellKeys(i)) map.set(key, myCapture.hex);
+    }
+    return map;
+  }, [isZones, user, zones, myCapture.hex]);
 
   const conflictCells = useMemo(() => {
     if (!options.conflicts || !myBoard || !room?.puzzle) return null;
@@ -137,6 +166,9 @@ export function GameScreen() {
         if (breakdown?.completedRow) parts.push(`fila +${POINTS_PER_LINE}`);
         if (breakdown?.completedCol) parts.push(`columna +${POINTS_PER_LINE}`);
         if (breakdown?.completedBox) parts.push(`bloque +${POINTS_PER_BLOCK}`);
+        if (result.zoneCaptured != null) {
+          parts.push(`zona capturada (${result.zonesOwned}/${ZONE_WIN_THRESHOLD})`);
+        }
         if (result.streak >= 5) {
           parts.push(`racha ×${streakMultiplier(result.streak)}`);
         }
@@ -157,16 +189,12 @@ export function GameScreen() {
             completedBox: false,
           };
           setPointsGain(buildPointsGain(details, burstId));
-          setScorePulse(true);
           const cells = celebrationCells(row, col, details);
           if (cells.size > 0) {
             setCelebrateCells(cells);
             setTimeout(() => setCelebrateCells(null), 900);
           }
-          setTimeout(() => {
-            setPointsGain(null);
-            setScorePulse(false);
-          }, 1400);
+          setTimeout(() => setPointsGain(null), 1600);
         }
       }
     } catch (err) {
@@ -192,7 +220,7 @@ export function GameScreen() {
   }, [room, user, attacks]);
 
   const handleHint = useCallback(async () => {
-    if (!options.hints || !selectedCell || !room || !user || frozen || finished || boardDone) return;
+    if (!hintsEnabled || !selectedCell || !room || !user || frozen || finished || boardDone) return;
     const check = canUseHint(me);
     if (!check.ok) {
       setStatus({ message: check.reason, type: "error" });
@@ -211,7 +239,7 @@ export function GameScreen() {
     } catch (err) {
       setStatus({ message: err.message, type: "error" });
     }
-  }, [options.hints, selectedCell, room, user, frozen, finished, boardDone, me, gameService]);
+  }, [hintsEnabled, selectedCell, room, user, frozen, finished, boardDone, me, gameService]);
 
   useEffect(() => {
     if (!waitingForOpponent) return;
@@ -262,9 +290,9 @@ export function GameScreen() {
     onInput: handleNumberInput,
     onClear: () => handleNumberInput(0),
     onToggleDraft: options.notes ? () => setDraftMode((v) => !v) : undefined,
-    onHint: options.hints ? handleHint : undefined,
+    onHint: hintsEnabled ? handleHint : undefined,
     notesEnabled: options.notes,
-    hintsEnabled: options.hints,
+    hintsEnabled,
   });
 
   useEffect(() => {
@@ -294,12 +322,19 @@ export function GameScreen() {
   const myFinal = playerScore(me);
   const oppFinal = playerScore(opponent);
   const hintCheck = canUseHint(me);
-  const canHintNow = Boolean(selectedCell) && hintCheck.ok;
+  const canHintNow = Boolean(selectedCell) && hintCheck.ok && hintsEnabled;
   const attackRegen = getAttackRegenInfo(room.startedAt);
   const attackLimit = attackRegen.limit;
-  const myLeadValue = room.battleMode === "score" ? myScore : me?.solvedCount || 0;
-  const oppLeadValue =
-    room.battleMode === "score" ? playerScore(opponent) : opponent?.solvedCount || 0;
+  const myLeadValue = isZones
+    ? myZones
+    : room.battleMode === "score"
+      ? myScore
+      : me?.solvedCount || 0;
+  const oppLeadValue = isZones
+    ? oppZones
+    : room.battleMode === "score"
+      ? playerScore(opponent)
+      : opponent?.solvedCount || 0;
   const iLead = myLeadValue > oppLeadValue;
   const oppLeads = oppLeadValue > myLeadValue;
   const canBuyDefense =
@@ -308,14 +343,12 @@ export function GameScreen() {
     (me?.defensesBought || 0) < MAX_DEFENSE_BUYS &&
     myScore >= DEFENSE_COST;
   const attackCredits = me?.attackCredits || 0;
-  const myStreak = me?.streak || 0;
-  const myStreakMult = streakMultiplier(myStreak);
 
   const shortcuts = [
     "1-9",
     "0/Supr borrar",
     options.notes && "P notas",
-    options.hints && "H hint",
+    hintsEnabled && "H hint",
     "flechas",
   ]
     .filter(Boolean)
@@ -421,7 +454,7 @@ export function GameScreen() {
     </div>
   );
 
-  const hintsPanel = options.hints ? (
+  const hintsPanel = hintsEnabled ? (
     <div className="attack-info card-small">
       <h3>💡 Hints</h3>
       <p>
@@ -458,8 +491,8 @@ export function GameScreen() {
                 opponent={opponent}
                 battleMode={room.battleMode || "race"}
                 mistakes={mistakes}
-                pointsGain={pointsGain}
-                scorePulse={scorePulse}
+                myZones={myZones}
+                oppZones={oppZones}
               />
             </div>
           </div>
@@ -478,14 +511,13 @@ export function GameScreen() {
             attackRegen={attackRegen}
             iLead={iLead}
             oppLeads={oppLeads}
-            pointsGain={pointsGain}
           />
 
           <div className="board-toolbar">
             <BoardSizePicker value={boardSize} onChange={setBoardSize} />
             <GameTools
               showNotes={options.notes}
-              showHints={options.hints}
+              showHints={hintsEnabled}
               draftMode={draftMode}
               onToggleDraft={() => setDraftMode((v) => !v)}
               onHint={handleHint}
@@ -497,10 +529,14 @@ export function GameScreen() {
           </div>
           {waitingForOpponent && (
             <p className="waiting-banner-inline">
-              ¡Completaste! Esperando a {oppName} para cerrar por puntos…
+              ¡Completaste! Esperando a {oppName} para cerrar
+              {isZones ? " por zonas" : " por puntos"}…
             </p>
           )}
-          {room.battleMode === "score" && opponent?.boardCompleted && !finished && !boardDone && (
+          {(room.battleMode === "score" || isZones) &&
+            opponent?.boardCompleted &&
+            !finished &&
+            !boardDone && (
             <p className="waiting-banner-inline rival">
               {oppName} ya terminó — completa tu tablero
             </p>
@@ -508,33 +544,50 @@ export function GameScreen() {
           {options.notes && draftMode && (
             <p className="draft-banner">Modo notas activo — los dígitos son solo candidatos</p>
           )}
-          <div className="board-wrapper">
-            {frozen && !boardDone && (
-              <div className="frozen-overlay">
-                <span>❄️ Entrada congelada</span>
-              </div>
-            )}
-            {waitingForOpponent && (
-              <div className="frozen-overlay waiting-overlay">
-                <span>⏳ Esperando al rival</span>
-              </div>
-            )}
-            <SudokuBoard
-              board={myBoard}
-              puzzle={room.puzzle}
-              attacks={attacks}
-              playerId={user.uid}
-              selectedCell={selectedCell}
-              onCellClick={handleCellClick}
-              onJoystickInput={handleJoystickInput}
-              joystickEnabled={!inputLocked}
-              draftMode={options.notes && draftMode}
-              wrongCell={wrongCell}
-              notes={options.notes ? notes : {}}
-              conflictCells={conflictCells}
-              celebrateCells={celebrateCells}
-              boardSize={boardSize}
-            />
+          <div className="board-stage">
+            <aside className="board-left-rail">
+              <StreakRail streak={myStreak} multiplier={myStreakMult} />
+              <PointsRail pointsGain={pointsGain} />
+              {isZones && (
+                <ZonesMap
+                  zones={zones}
+                  meUid={user.uid}
+                  oppUid={opponent?.uid}
+                  myColor={myCapture.hex}
+                  oppColor={oppCapture.hex}
+                  threshold={ZONE_WIN_THRESHOLD}
+                />
+              )}
+            </aside>
+            <div className="board-wrapper">
+              {frozen && !boardDone && (
+                <div className="frozen-overlay">
+                  <span>❄️ Entrada congelada</span>
+                </div>
+              )}
+              {waitingForOpponent && (
+                <div className="frozen-overlay waiting-overlay">
+                  <span>⏳ Esperando al rival</span>
+                </div>
+              )}
+              <SudokuBoard
+                board={myBoard}
+                puzzle={room.puzzle}
+                attacks={attacks}
+                playerId={user.uid}
+                selectedCell={selectedCell}
+                onCellClick={handleCellClick}
+                onJoystickInput={handleJoystickInput}
+                joystickEnabled={!inputLocked}
+                draftMode={options.notes && draftMode}
+                wrongCell={wrongCell}
+                notes={options.notes ? notes : {}}
+                conflictCells={conflictCells}
+                celebrateCells={celebrateCells}
+                zoneTints={zoneTints}
+                boardSize={boardSize}
+              />
+            </div>
           </div>
           <Numpad
             frozen={inputLocked}
@@ -575,13 +628,31 @@ export function GameScreen() {
           {waitingForOpponent && (
             <div className="waiting-banner card-small">
               <strong>¡Completaste tu sudoku!</strong>
-              <p>Esperando a que {oppName} termine para definir el ganador por puntos.</p>
+              <p>
+                Esperando a que {oppName} termine para definir el ganador
+                {isZones ? " por zonas" : " por puntos"}.
+              </p>
             </div>
           )}
-          {room.battleMode === "score" && opponent?.boardCompleted && !finished && !boardDone && (
+          {(room.battleMode === "score" || isZones) &&
+            opponent?.boardCompleted &&
+            !finished &&
+            !boardDone && (
             <div className="waiting-banner rival-done card-small">
               <strong>{oppName} ya terminó</strong>
               <p>Completa tu tablero para cerrar la ronda.</p>
+            </div>
+          )}
+
+          {isZones && (
+            <div className="zones-legend card-small">
+              <p>
+                <span className="zones-swatch" style={{ background: myCapture.hex }} /> Tú ·{" "}
+                <span className="zones-swatch" style={{ background: oppCapture.hex }} /> {oppName}
+              </p>
+              <p className="shop-meta">
+                Zonas {myZones}–{oppZones} · meta {ZONE_WIN_THRESHOLD}
+              </p>
             </div>
           )}
 
@@ -612,18 +683,22 @@ export function GameScreen() {
           <div className="game-overlay-content">
             <h2>{won ? "¡Victoria!" : "Derrota"}</h2>
             <p>
-              {room.battleMode === "score"
+              {room.battleMode === "zones"
                 ? won
-                  ? `Ganaste por puntos (${myFinal} vs ${oppFinal}). +${diff.winPoints} pts`
-                  : `${room.winnerName} ganó por puntos (${oppFinal} vs ${myFinal}). +5 pts por participar`
-                : won
-                  ? `Resolviste el sudoku primero (${diff.label}). +${diff.winPoints} pts`
-                  : `${room.winnerName} resolvió el sudoku primero. +5 pts por participar`}
+                  ? `Ganaste la guerra de zonas (${myZones}–${oppZones}). +${diff.winPoints} pts`
+                  : `${room.winnerName} ganó por zonas (${oppZones}–${myZones}). +5 pts por participar`
+                : room.battleMode === "score"
+                  ? won
+                    ? `Ganaste por puntos (${myFinal} vs ${oppFinal}). +${diff.winPoints} pts`
+                    : `${room.winnerName} ganó por puntos (${oppFinal} vs ${myFinal}). +5 pts por participar`
+                  : won
+                    ? `Resolviste el sudoku primero (${diff.label}). +${diff.winPoints} pts`
+                    : `${room.winnerName} resolvió el sudoku primero. +5 pts por participar`}
             </p>
             {options.timer && (
               <p className="overlay-meta">Tiempo: {formatElapsed(elapsed)}</p>
             )}
-            {(me?.hintsUsed || opponent?.hintsUsed) ? (
+            {hintsEnabled && (me?.hintsUsed || opponent?.hintsUsed) ? (
               <p className="overlay-meta">
                 Hints: tú {me?.hintsUsed || 0} · rival {opponent?.hintsUsed || 0}
               </p>

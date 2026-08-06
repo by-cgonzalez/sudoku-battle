@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "../contexts/AuthContext";
 import { useGame } from "../contexts/GameContext";
 import { MAX_PLAYERS } from "../lib/game";
@@ -9,9 +9,15 @@ import {
   getInviteUrl,
   normalizeGameOptions,
 } from "../lib/features";
+import {
+  CAPTURE_COLORS,
+  DEFAULT_CAPTURE_COLOR,
+  getCaptureColor,
+} from "../lib/zones";
 import { getUserDisplayName } from "../lib/auth";
 import { HeadToHeadPanel } from "./HeadToHeadPanel";
 import { OptionsPanel } from "./OptionsPanel";
+import { CaptureColorPicker } from "./GameUI";
 
 function inviteQrUrl(inviteUrl, size = 72) {
   const params = new URLSearchParams({
@@ -40,10 +46,15 @@ function FighterCard({ player, side, isHost, waiting = false }) {
   }
 
   const initial = (player.name || "?").trim().charAt(0).toUpperCase();
+  const color = getCaptureColor(player.captureColor || DEFAULT_CAPTURE_COLOR);
 
   return (
     <div className={`fighter-card fighter-${side}`}>
-      <div className="fighter-avatar" aria-hidden="true">
+      <div
+        className="fighter-avatar"
+        aria-hidden="true"
+        style={{ boxShadow: `0 0 0 2px ${color.hex}` }}
+      >
         {player.photoURL ? <img src={player.photoURL} alt="" /> : <span>{initial}</span>}
       </div>
       <div className="fighter-info">
@@ -62,6 +73,8 @@ export function RoomScreen() {
   const [status, setStatus] = useState({ message: "", type: "" });
   const [copied, setCopied] = useState("");
   const [diffBusy, setDiffBusy] = useState(false);
+  const [optimisticColor, setOptimisticColor] = useState(null);
+  const colorReqRef = useRef(0);
 
   const inviteUrl = room?.code ? getInviteUrl(room.code) : "";
   const qrSrc = useMemo(
@@ -69,16 +82,29 @@ export function RoomScreen() {
     [inviteUrl]
   );
 
+  const me = room?.players?.find((p) => p.uid === user?.uid) || room?.players?.[0];
+  const serverColor = me?.captureColor || DEFAULT_CAPTURE_COLOR;
+
+  useEffect(() => {
+    if (optimisticColor && serverColor === optimisticColor) {
+      setOptimisticColor(null);
+    }
+  }, [serverColor, optimisticColor]);
+
   if (!room) return null;
 
   const diff = getDifficulty(room.difficulty);
   const battle = getBattleMode(room.battleMode);
-  const options = normalizeGameOptions(room.options);
+  const options = normalizeGameOptions(room.options, room.battleMode);
   const opponent = getOpponent(room);
   const isHost = room.hostId === user?.uid;
   const canStart = isHost && room.players.length === MAX_PLAYERS;
-  const me = room.players.find((p) => p.uid === user?.uid) || room.players[0];
   const rival = opponent || null;
+  const isZones = room.battleMode === "zones";
+  const myColor = optimisticColor || serverColor;
+  const takenColors = (room.players || [])
+    .filter((p) => p.uid !== user?.uid)
+    .map((p) => p.captureColor || DEFAULT_CAPTURE_COLOR);
   const inviteText = buildInviteText({
     code: room.code,
     hostName: getUserDisplayName(user),
@@ -106,6 +132,18 @@ export function RoomScreen() {
     } finally {
       setDiffBusy(false);
     }
+  };
+
+  const changeColor = (colorId) => {
+    if (colorId === myColor || takenColors.includes(colorId)) return;
+    const req = ++colorReqRef.current;
+    setOptimisticColor(colorId);
+    setStatus({ message: "", type: "" });
+    gameService.updateCaptureColor(room.id, colorId).catch((err) => {
+      if (req !== colorReqRef.current) return;
+      setOptimisticColor(null);
+      setStatus({ message: err.message, type: "error" });
+    });
   };
 
   const copyValue = async (value, kind) => {
@@ -168,43 +206,6 @@ export function RoomScreen() {
               isHost={rival?.uid === room.hostId}
               waiting={!rival}
             />
-          </div>
-
-          <div className="room-diff-panel">
-            <div className="room-diff-header">
-              <h3>Dificultad</h3>
-              <p>
-                {isHost
-                  ? "Puedes cambiarla mientras esperas (regenera el sudoku)."
-                  : "Definida por el anfitrión."}
-              </p>
-            </div>
-            <div className="room-diff-options" role="group" aria-label="Dificultad de la sala">
-              {Object.values(DIFFICULTIES).map((d) => {
-                const selected = room.difficulty === d.id;
-                return (
-                  <button
-                    key={d.id}
-                    type="button"
-                    className={`room-diff-option${selected ? " selected" : ""}`}
-                    style={{ "--diff-accent": d.accent }}
-                    disabled={!isHost || diffBusy}
-                    onClick={() => changeDifficulty(d.id)}
-                    title={
-                      isHost
-                        ? `Cambiar a ${d.label}`
-                        : `${d.label} · solo el anfitrión puede cambiar`
-                    }
-                  >
-                    <span className="room-diff-icon" aria-hidden="true">
-                      {d.icon}
-                    </span>
-                    <span className="room-diff-name">{d.label}</span>
-                    <span className="room-diff-meta">+{d.winPoints} pts</span>
-                  </button>
-                );
-              })}
-            </div>
           </div>
 
           <p className="host-hint">
@@ -283,12 +284,68 @@ export function RoomScreen() {
           </div>
         </div>
 
-        <div className="card room-options-card">
-          <OptionsPanel
-            options={options}
-            readOnly
-            title={isHost ? "Opciones de la sala" : "Opciones definidas por el anfitrión"}
-          />
+        <div className="room-side-stack">
+          <div className="card room-options-card">
+            <OptionsPanel
+              options={options}
+              readOnly
+              battleMode={room.battleMode}
+              title={isHost ? "Opciones de la sala" : "Opciones definidas por el anfitrión"}
+            />
+          </div>
+
+          <div className="card room-diff-panel room-side-panel">
+            <div className="room-diff-header">
+              <h3>Dificultad</h3>
+              <p>
+                {isHost
+                  ? "Puedes cambiarla mientras esperas (regenera el sudoku)."
+                  : "Definida por el anfitrión."}
+              </p>
+            </div>
+            <div className="room-diff-options" role="group" aria-label="Dificultad de la sala">
+              {Object.values(DIFFICULTIES).map((d) => {
+                const selected = room.difficulty === d.id;
+                return (
+                  <button
+                    key={d.id}
+                    type="button"
+                    className={`room-diff-option${selected ? " selected" : ""}`}
+                    style={{ "--diff-accent": d.accent }}
+                    disabled={!isHost || diffBusy}
+                    onClick={() => changeDifficulty(d.id)}
+                    title={
+                      isHost
+                        ? `Cambiar a ${d.label}`
+                        : `${d.label} · solo el anfitrión puede cambiar`
+                    }
+                  >
+                    <span className="room-diff-icon" aria-hidden="true">
+                      {d.icon}
+                    </span>
+                    <span className="room-diff-name">{d.label}</span>
+                    <span className="room-diff-meta">+{d.winPoints} pts</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {isZones && (
+            <div className="card room-color-panel room-side-panel">
+              <CaptureColorPicker
+                colors={CAPTURE_COLORS}
+                selectedId={myColor}
+                takenIds={takenColors}
+                onSelect={changeColor}
+                title="Tu color de captura"
+              />
+              <p className="hint">
+                Cada bloque 3×3 que completes se tiñe con tu color. Primer jugador en 5 zonas
+                gana.
+              </p>
+            </div>
+          )}
         </div>
       </div>
     </section>
