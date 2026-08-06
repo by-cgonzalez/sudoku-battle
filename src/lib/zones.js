@@ -3,6 +3,9 @@ import { completedUnitsAt, playerScore } from "./features";
 /** First player to claim this many 3×3 blocks wins instantly. */
 export const ZONE_WIN_THRESHOLD = 5;
 
+/** Firestore boards key for the contested shared grid in zones mode. */
+export const SHARED_BOARD_KEY = "shared";
+
 export const CAPTURE_COLORS = [
   { id: "cyan", label: "Cian", hex: "#22d3ee" },
   { id: "amber", label: "Ámbar", hex: "#f59e0b" },
@@ -63,9 +66,18 @@ export function countZonesFor(zones, uid) {
   return n;
 }
 
+export function cellOwnerKey(row, col) {
+  return `${row}-${col}`;
+}
+
+export function normalizeCellOwners(owners) {
+  if (!owners || typeof owners !== "object") return {};
+  return { ...owners };
+}
+
 /**
- * If placing at (row,col) completes a free block, claim it for uid.
- * Returns { zones, capturedIndex } (capturedIndex null if nothing new).
+ * Last player who places the number that completes a 3×3 block claims it.
+ * Returns { zones, capturedIndex } (capturedIndex null if block not completed).
  */
 export function tryCaptureZone(zones, board, puzzle, solution, row, col, uid) {
   const map = normalizeZones(zones);
@@ -73,12 +85,20 @@ export function tryCaptureZone(zones, board, puzzle, solution, row, col, uid) {
   if (!done.box) return { zones: map, capturedIndex: null };
 
   const idx = boxIndex(row, col);
-  if (map[idx]) return { zones: map, capturedIndex: null };
-
   return {
     zones: { ...map, [idx]: uid },
     capturedIndex: idx,
   };
+}
+
+/** Drop zone ownership when the block is no longer fully solved. */
+export function releaseZoneIfIncomplete(zones, board, puzzle, solution, row, col) {
+  const map = normalizeZones(zones);
+  const idx = boxIndex(row, col);
+  if (!map[idx]) return map;
+  const done = completedUnitsAt(board, puzzle, solution, row, col);
+  if (done.box) return map;
+  return { ...map, [idx]: null };
 }
 
 /** Cell keys belonging to a zone index. */

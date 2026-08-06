@@ -39,7 +39,7 @@ export const BATTLE_MODES = {
     id: "zones",
     label: "Guerra de zonas",
     icon: "🗺️",
-    desc: "Captura bloques 3×3; gana con 5 zonas o más al final",
+    desc: "Tablero compartido con puntos y rachas; el que cierre un bloque 3×3 lo captura (5 zonas ganan)",
   },
 };
 

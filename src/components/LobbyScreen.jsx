@@ -272,7 +272,7 @@ export function LobbyScreen() {
                 />
                 <p className="hint options-hint">
                   {battleMode === "zones"
-                    ? "En Guerra de zonas no hay hints. Elige tu color de captura en la sala."
+                    ? "Tablero compartido, sin hints. Elige tu color en la sala; quien cierre un bloque lo gana."
                     : "Quien invita define estas opciones. También aplican en solitario (menú del perfil)."}
                 </p>
               </aside>

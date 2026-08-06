@@ -55,6 +55,7 @@ export function SudokuBoard({
   conflictCells = null,
   celebrateCells = null,
   zoneTints = null,
+  cellTints = null,
   boardSize = DEFAULT_BOARD_SIZE,
 }) {
   const sizePx = getBoardSize(boardSize).px;
@@ -86,8 +87,10 @@ export function SudokuBoard({
             const wrong = wrongCell?.row === r && wrongCell?.col === c;
             const inConflict = conflictCells?.has(notesKey(r, c));
             const celebrating = celebrateCells?.has(notesKey(r, c));
-            const zoneTint = zoneTints?.get?.(notesKey(r, c)) || null;
-            const cellNotes = !value ? notes[notesKey(r, c)] || [] : [];
+            const cellKey = notesKey(r, c);
+            const cellTint = !fixed ? cellTints?.get?.(cellKey) || null : null;
+            const zoneTint = zoneTints?.get?.(cellKey) || null;
+            const cellNotes = !value ? notes[cellKey] || [] : [];
             const related =
               highlight &&
               selectedCell &&
@@ -99,7 +102,10 @@ export function SudokuBoard({
             const sameNumber =
               highlight && selectedValue > 0 && value === selectedValue;
             const digitComplete = value > 0 && completedDigits.has(value);
-            const editable = !fixed && !blocked;
+            const lockedByOwner = Boolean(cellTint && value);
+            const editable = !fixed && !blocked && !lockedByOwner;
+            const inBoxRow = r % 3;
+            const inBoxCol = c % 3;
 
             const classes = [
               "sudoku-cell",
@@ -109,7 +115,12 @@ export function SudokuBoard({
               wrong && "wrong",
               inConflict && "conflict",
               celebrating && "celebrate",
+              cellTint && "cell-owned",
               zoneTint && "zone-owned",
+              zoneTint && inBoxRow === 0 && "zone-edge-t",
+              zoneTint && inBoxRow === 2 && "zone-edge-b",
+              zoneTint && inBoxCol === 0 && "zone-edge-l",
+              zoneTint && inBoxCol === 2 && "zone-edge-r",
               related && "related",
               sameNumber && "same-number",
               digitComplete && "digit-complete",
@@ -121,13 +132,16 @@ export function SudokuBoard({
               .join(" ");
 
             const touch = bindCell(r, c, { fixed, blocked, editable });
+            const style = {};
+            if (cellTint) style["--cell-tint"] = cellTint;
+            if (zoneTint) style["--zone-tint"] = zoneTint;
 
             return (
               <button
                 key={`${r}-${c}`}
                 type="button"
                 className={classes}
-                style={zoneTint ? { "--zone-tint": zoneTint } : undefined}
+                style={Object.keys(style).length ? style : undefined}
                 disabled={blocked}
                 onClick={wrapClick(() => onCellClick(r, c, fixed, blocked))}
                 {...touch}
@@ -344,8 +358,12 @@ export function MatchHud({
             {progressLabel}
           </span>
           <strong className="match-hud-score-value">
-            {myProgress}/{totalEmpty}
-            {myScore != null ? ` · ${myScore}pts` : ""}
+            {myScore != null ? myScore : `${myProgress}/${totalEmpty}`}
+            {myScore != null && (
+              <span className="match-hud-score-sub">
+                {myProgress}/{totalEmpty} aciertos
+              </span>
+            )}
             {pointsGain != null && pointsGain.total > 0 && (
               <span className="hud-score-float" key={pointsGain.id || pointsGain.total}>
                 +{pointsGain.total}
@@ -423,26 +441,33 @@ export function ScorePanel({
   const oppScore = playerScore(opponent);
   const mySolved = me?.solvedCount || 0;
   const oppSolved = opponent?.solvedCount || 0;
-  const myValue =
-    battleMode === "zones"
-      ? myZones
-      : battleMode === "score"
-        ? myScore
-        : mySolved;
-  const oppValue =
-    battleMode === "zones"
-      ? oppZones
-      : battleMode === "score"
-        ? oppScore
-        : oppSolved;
-  const iLead = myValue > oppValue;
-  const oppLeads = oppValue > myValue;
+  // Zones wins the match via the map, but in-match scoring/lead mirrors score mode (pts).
+  const myLeadValue =
+    battleMode === "score" || battleMode === "zones" ? myScore : mySolved;
+  const oppLeadValue =
+    battleMode === "score" || battleMode === "zones" ? oppScore : oppSolved;
+  const iLead = myLeadValue > oppLeadValue;
+  const oppLeads = oppLeadValue > myLeadValue;
   const unit =
-    battleMode === "zones" ? "zonas" : battleMode === "score" ? "pts" : "aciertos";
+    battleMode === "score" || battleMode === "zones" ? "pts" : "aciertos";
   const oppName = opponent?.name?.split(" ")[0] || "Rival";
+  const panelTitle =
+    battleMode === "zones"
+      ? `${mode.desc} · Zonas ${myZones}–${oppZones}`
+      : mode.desc;
+
+  const myMeta = [
+    `${mySolved} aciertos`,
+    (me?.streak || 0) >= 5 ? `racha ${me.streak}` : null,
+    `${mistakes}✗`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  const oppMeta = `${oppSolved} aciertos`;
 
   return (
-    <div className="score-panel score-panel-minimal" title={mode.desc}>
+    <div className="score-panel score-panel-minimal" title={panelTitle}>
       <div
         className={`score-side me ${iLead ? "leading" : ""} ${me?.boardCompleted ? "done" : ""}`}
       >
@@ -450,17 +475,8 @@ export function ScorePanel({
           {iLead && <span className="score-crown" aria-hidden="true">👑</span>}
           <span className="score-name">Tú{me?.boardCompleted ? " ✓" : ""}</span>
         </div>
-        <strong className="score-num">{myValue}</strong>
-        <span className="score-meta">
-          {battleMode === "zones"
-            ? `${myScore} pts · ${mySolved} aciertos`
-            : battleMode === "score"
-              ? `${mySolved} aciertos`
-              : `${myScore} pts`}
-          {(me?.streak || 0) >= 5 ? ` · racha ${me.streak}` : ""}
-          {" · "}
-          {mistakes}✗
-        </span>
+        <strong className="score-num">{myScore}</strong>
+        <span className="score-meta">{myMeta}</span>
       </div>
       <div className="score-center">
         <span className="vs-badge">VS</span>
@@ -474,14 +490,8 @@ export function ScorePanel({
             {opponent?.boardCompleted ? " ✓" : ""}
           </span>
         </div>
-        <strong className="score-num">{oppValue}</strong>
-        <span className="score-meta">
-          {battleMode === "zones"
-            ? `${oppScore} pts · ${oppSolved} aciertos`
-            : battleMode === "score"
-              ? `${oppSolved} aciertos`
-              : `${oppScore} pts`}
-        </span>
+        <strong className="score-num">{oppScore}</strong>
+        <span className="score-meta">{oppMeta}</span>
       </div>
     </div>
   );
@@ -539,7 +549,6 @@ export function ZonesMap({
   oppUid,
   myColor,
   oppColor,
-  threshold = 5,
 }) {
   const cells = Array.from({ length: 9 }, (_, i) => {
     const owner = zones?.[i] ?? zones?.[String(i)] ?? null;
@@ -547,18 +556,9 @@ export function ZonesMap({
     const theirs = owner === oppUid;
     return { i, owner, mine, theirs };
   });
-  const myCount = cells.filter((c) => c.mine).length;
-  const oppCount = cells.filter((c) => c.theirs).length;
 
   return (
-    <div className="zones-map card-small">
-      <div className="zones-map-header">
-        <strong>Zonas</strong>
-        <span>
-          {myCount}–{oppCount}
-          <span className="zones-map-goal"> / {threshold}</span>
-        </span>
-      </div>
+    <div className="zones-map zones-map-graphic card-small">
       <div className="zones-grid" aria-label="Mapa de zonas">
         {cells.map(({ i, mine, theirs }) => (
           <div

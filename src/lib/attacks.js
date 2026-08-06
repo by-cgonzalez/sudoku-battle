@@ -22,17 +22,17 @@ export const ATTACK_DURATIONS = {
 export const ATTACK_LABELS = {
   [ATTACK_TYPES.FREEZE_INPUT]: {
     title: "Congelar entrada",
-    desc: "El oponente no puede escribir durante 4 segundos",
+    desc: "Congela solo la pantalla del rival durante 4 segundos (tú sigues jugando)",
     icon: "❄️",
   },
   [ATTACK_TYPES.BLOCK_LINE]: {
     title: "Bloquear línea",
-    desc: "Bloquea una fila del oponente por 10 segundos",
+    desc: "Bloquea una fila solo en la pantalla del rival por 10 segundos",
     icon: "➖",
   },
   [ATTACK_TYPES.BLOCK_CELL]: {
     title: "Bloquear celda",
-    desc: "Bloquea una celda del oponente por 10 segundos",
+    desc: "Bloquea una celda solo en la pantalla del rival por 10 segundos",
     icon: "🚫",
   },
 };

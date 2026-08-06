@@ -341,8 +341,8 @@ export function RoomScreen() {
                 title="Tu color de captura"
               />
               <p className="hint">
-                Cada bloque 3×3 que completes se tiñe con tu color. Primer jugador en 5 zonas
-                gana.
+                Tablero compartido: cada casilla que completes se marca con tu color. Quien
+                cierre un bloque 3×3 se lo queda. Primer jugador en 5 zonas gana.
               </p>
             </div>
           )}

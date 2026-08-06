@@ -35,11 +35,15 @@ import {
 import {
   CAPTURE_COLORS,
   DEFAULT_CAPTURE_COLOR,
+  SHARED_BOARD_KEY,
   ZONE_WIN_THRESHOLD,
+  cellOwnerKey,
   countZonesFor,
   emptyZones,
   getCaptureColor,
+  normalizeCellOwners,
   normalizeZones,
+  releaseZoneIfIncomplete,
   resolveZonesWinner,
   tryCaptureZone,
 } from "./zones";
@@ -49,6 +53,40 @@ const MAX_PLAYERS = 2;
 const ROOMS = "rooms";
 const ROOM_CODES = "roomCodes";
 const { FieldValue } = firebase.firestore;
+
+function isZonesBattle(battleMode) {
+  return battleMode === "zones";
+}
+
+function cloneBoard(board) {
+  return board.map((r) => [...r]);
+}
+
+function buildInitialBoards(puzzle, playerUids, battleMode) {
+  if (isZonesBattle(battleMode)) {
+    return { [SHARED_BOARD_KEY]: emptyPlayerBoard(puzzle) };
+  }
+  const boards = {};
+  for (const uid of playerUids) {
+    boards[uid] = emptyPlayerBoard(puzzle);
+  }
+  return boards;
+}
+
+function getActiveBoard(data, uid) {
+  if (isZonesBattle(data.battleMode)) {
+    return data.boards[SHARED_BOARD_KEY] || data.boards[uid];
+  }
+  return data.boards[uid];
+}
+
+function setActiveBoard(boards, battleMode, uid, board) {
+  if (isZonesBattle(battleMode)) {
+    boards[SHARED_BOARD_KEY] = board;
+  } else {
+    boards[uid] = board;
+  }
+}
 
 function generateRoomCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -90,6 +128,8 @@ function parseRoomData(data) {
     puzzle: ensureGrid(data.puzzle),
     solution: ensureGrid(data.solution),
     boards: unflattenBoards(data.boards),
+    zones: normalizeZones(data.zones),
+    cellOwners: normalizeCellOwners(data.cellOwners),
   };
 }
 
@@ -138,7 +178,11 @@ function resolveWinner(players, completerUid, battleMode, zones = null) {
   };
 }
 
-/** Ends race immediately; score/zones wait until every player finished their board. */
+/**
+ * Race ends on first board complete.
+ * Score waits until every player finished their own board.
+ * Zones uses a shared board — resolve as soon as it is complete.
+ */
 function applyBoardCompletion(
   updates,
   players,
@@ -154,9 +198,23 @@ function applyBoardCompletion(
   }
 
   let nextPlayers = markPlayerBoardCompleted(players, completerUid);
+
+  if (battleMode === "zones") {
+    // Shared board: mark everyone done and resolve by zones.
+    nextPlayers = nextPlayers.map((p) =>
+      p.boardCompleted
+        ? p
+        : {
+            ...p,
+            boardCompleted: true,
+            completedAt: p.completedAt || Date.now(),
+          }
+    );
+  }
+
   updates.players = nextPlayers;
 
-  if (battleMode === "score" || battleMode === "zones") {
+  if (battleMode === "score") {
     if (!allPlayersBoardCompleted(nextPlayers)) {
       return { players: nextPlayers, matchFinished: false, waitingForOpponent: true };
     }
@@ -222,10 +280,11 @@ export class GameService {
       solution: flattenGrid(solution),
       rankingProcessed: [],
       headToHeadRecorded: false,
-      boards: flattenBoards({ [user.uid]: emptyPlayerBoard(puzzle) }),
+      boards: flattenBoards(buildInitialBoards(puzzle, [user.uid], battleMode.id)),
       lastMoves: {},
       attacks: [],
       zones: emptyZones(),
+      cellOwners: {},
       winner: null,
       winnerName: null,
       createdAt: FieldValue.serverTimestamp(),
@@ -290,16 +349,26 @@ export class GameService {
         CAPTURE_COLORS[1].id;
 
       const updatedPlayers = [...data.players, playerPayload(user, freeColor)];
-      const boards = {
-        ...data.boards,
-        [user.uid]: emptyPlayerBoard(data.puzzle),
-      };
+      const battleMode = data.battleMode || "race";
+      let boards;
+      if (isZonesBattle(battleMode)) {
+        boards = {
+          [SHARED_BOARD_KEY]:
+            data.boards[SHARED_BOARD_KEY] || emptyPlayerBoard(data.puzzle),
+        };
+      } else {
+        boards = {
+          ...data.boards,
+          [user.uid]: emptyPlayerBoard(data.puzzle),
+        };
+      }
 
       tx.update(roomRef, {
         players: updatedPlayers,
         playerUids: updatedPlayers.map((p) => p.uid),
         boards: flattenBoards(boards),
         zones: normalizeZones(data.zones),
+        cellOwners: normalizeCellOwners(data.cellOwners),
         updatedAt: FieldValue.serverTimestamp(),
       });
 
@@ -400,10 +469,11 @@ export class GameService {
       }
 
       const { puzzle, solution } = generateSudoku(difficulty.cellsToRemove);
-      const boards = {};
-      for (const p of data.players) {
-        boards[p.uid] = emptyPlayerBoard(puzzle);
-      }
+      const boards = buildInitialBoards(
+        puzzle,
+        data.players.map((p) => p.uid),
+        data.battleMode || "race"
+      );
 
       tx.update(docRef, {
         difficulty: difficulty.id,
@@ -413,6 +483,7 @@ export class GameService {
         boards: flattenBoards(boards),
         lastMoves: {},
         zones: emptyZones(),
+        cellOwners: {},
         updatedAt: FieldValue.serverTimestamp(),
       });
 
@@ -462,10 +533,27 @@ export class GameService {
 
       const puzzle = data.puzzle;
       const solution = data.solution;
+      const battleMode = data.battleMode || "race";
+      const zonesMode = isZonesBattle(battleMode);
       const boards = { ...data.boards };
-      const board = boards[user.uid].map((r) => [...r]);
+      const active = getActiveBoard(data, user.uid);
+      if (!active) throw new Error("Tablero no disponible");
+      const board = cloneBoard(active);
 
       if (puzzle[row][col] !== 0) throw new Error("Celda fija");
+
+      const previous = board[row][col];
+      const ownerKey = cellOwnerKey(row, col);
+      let cellOwners = normalizeCellOwners(data.cellOwners);
+      const previousOwner = cellOwners[ownerKey] || null;
+
+      // Shared board: correct cells are locked for everyone except clearing your own.
+      if (zonesMode && previous !== 0 && previous === solution[row][col]) {
+        if (value !== 0) throw new Error("Celda ya ocupada");
+        if (previousOwner && previousOwner !== user.uid) {
+          throw new Error("Solo puedes borrar tus propias casillas");
+        }
+      }
 
       // Wrong guess: break streak (persisted) without placing the number.
       if (value !== 0 && value !== solution[row][col]) {
@@ -490,9 +578,8 @@ export class GameService {
         };
       }
 
-      const previous = board[row][col];
       board[row][col] = value;
-      boards[user.uid] = board;
+      setActiveBoard(boards, battleMode, user.uid, board);
 
       const wasCorrect =
         value !== 0 && value === solution[row][col] && previous !== value;
@@ -511,10 +598,11 @@ export class GameService {
       let nextStreak = mePlayer?.streak || 0;
       let zoneCaptured = null;
       let zones = normalizeZones(data.zones);
-      const battleMode = data.battleMode || "race";
 
       if (wasCorrect) {
         const key = placementScoreKey(row, col);
+        if (zonesMode) cellOwners[ownerKey] = user.uid;
+
         players = players.map((p) => {
           if (p.uid !== user.uid) return p;
           const streak = (p.streak || 0) + 1;
@@ -543,7 +631,7 @@ export class GameService {
           };
         });
 
-        if (battleMode === "zones") {
+        if (zonesMode) {
           const capture = tryCaptureZone(
             zones,
             board,
@@ -558,8 +646,12 @@ export class GameService {
         }
       } else if (wasCleared) {
         const key = placementScoreKey(row, col);
+        if (zonesMode) delete cellOwners[ownerKey];
+
+        // Refund the player who owned/scored the cell (shared board may differ).
+        const ownerUid = zonesMode ? previousOwner || user.uid : user.uid;
         players = players.map((p) => {
-          if (p.uid !== user.uid) return p;
+          if (p.uid !== ownerUid) return p;
           const solvedBefore = p.solvedCount || 0;
           const hadScoredPlacement = Object.prototype.hasOwnProperty.call(
             p.placementScores || {},
@@ -568,13 +660,12 @@ export class GameService {
           const refund = hadScoredPlacement ? p.placementScores[key] || 0 : 0;
           const nextScores = { ...p.placementScores };
           delete nextScores[key];
-          // Only reverse streak/credits for placements that awarded them (not hints).
           const revokeCredit =
             hadScoredPlacement && shouldEarnAttackCredit(solvedBefore) ? 1 : 0;
           const nextPlayerStreak = hadScoredPlacement
             ? Math.max(0, (p.streak || 0) - 1)
             : p.streak || 0;
-          nextStreak = nextPlayerStreak;
+          if (p.uid === user.uid) nextStreak = nextPlayerStreak;
           return {
             ...p,
             solvedCount: Math.max(0, solvedBefore - 1),
@@ -584,6 +675,17 @@ export class GameService {
             placementScores: nextScores,
           };
         });
+
+        if (zonesMode) {
+          zones = releaseZoneIfIncomplete(
+            zones,
+            board,
+            puzzle,
+            solution,
+            row,
+            col
+          );
+        }
       }
 
       const attacks = pruneExpiredAttacks(data.attacks);
@@ -597,6 +699,7 @@ export class GameService {
         fromHint: false,
         pointsEarned,
         attackCreditEarned,
+        previousOwner,
       };
 
       const updates = {
@@ -607,6 +710,7 @@ export class GameService {
         zones,
         updatedAt: FieldValue.serverTimestamp(),
       };
+      if (zonesMode) updates.cellOwners = cellOwners;
 
       let zoneWin = false;
       if (
@@ -674,8 +778,11 @@ export class GameService {
 
       const puzzle = data.puzzle;
       const solution = data.solution;
+      const battleMode = data.battleMode || "race";
       const boards = { ...data.boards };
-      const board = boards[user.uid].map((r) => [...r]);
+      const active = getActiveBoard(data, user.uid);
+      if (!active) throw new Error("Tablero no disponible");
+      const board = cloneBoard(active);
 
       if (puzzle[row][col] !== 0) throw new Error("Celda fija");
       if (board[row][col] === solution[row][col]) {
@@ -688,7 +795,7 @@ export class GameService {
       const previous = board[row][col];
       const value = solution[row][col];
       board[row][col] = value;
-      boards[user.uid] = board;
+      setActiveBoard(boards, battleMode, user.uid, board);
 
       const players = data.players.map((p) =>
         p.uid === user.uid
@@ -754,19 +861,32 @@ export class GameService {
       const lastMove = data.lastMoves?.[user.uid];
       if (!lastMove) throw new Error("No hay movimiento para deshacer");
 
-      const { row, col, previous, value, fromHint, pointsEarned = 0, attackCreditEarned = false } =
-        lastMove;
+      const {
+        row,
+        col,
+        previous,
+        value,
+        fromHint,
+        pointsEarned = 0,
+        attackCreditEarned = false,
+        previousOwner = null,
+      } = lastMove;
+      const battleMode = data.battleMode || "race";
+      const zonesMode = isZonesBattle(battleMode);
       const boards = { ...data.boards };
-      const board = boards[user.uid].map((r) => [...r]);
+      const active = getActiveBoard(data, user.uid);
+      if (!active) throw new Error("Tablero no disponible");
+      const board = cloneBoard(active);
 
       if (board[row][col] !== value) {
         throw new Error("No hay movimiento para deshacer");
       }
 
       board[row][col] = previous;
-      boards[user.uid] = board;
+      setActiveBoard(boards, battleMode, user.uid, board);
 
       const solution = data.solution;
+      const puzzle = data.puzzle;
       const wasCorrect = value !== 0 && value === solution[row][col] && previous !== value;
       const wasCleared =
         value === 0 && previous !== 0 && previous === solution[row][col];
@@ -775,8 +895,15 @@ export class GameService {
         ...p,
         placementScores: { ...(p.placementScores || {}) },
       }));
+      let cellOwners = normalizeCellOwners(data.cellOwners);
+      let zones = normalizeZones(data.zones);
+      const ownerKey = cellOwnerKey(row, col);
+
       if (wasCorrect) {
         const key = placementScoreKey(row, col);
+        if (previousOwner) cellOwners[ownerKey] = previousOwner;
+        else delete cellOwners[ownerKey];
+
         players = players.map((p) => {
           if (p.uid !== user.uid) return p;
           const nextScores = { ...p.placementScores };
@@ -797,8 +924,22 @@ export class GameService {
               : p.hintsUsed || 0,
           };
         });
+
+        if (zonesMode) {
+          zones = releaseZoneIfIncomplete(
+            zones,
+            board,
+            puzzle,
+            solution,
+            row,
+            col
+          );
+        }
       } else if (wasCleared) {
         // Undoing a clear restores the previous correct fill without re-scoring.
+        if (previousOwner) cellOwners[ownerKey] = previousOwner;
+        else cellOwners[ownerKey] = user.uid;
+
         players = players.map((p) =>
           p.uid === user.uid
             ? {
@@ -808,6 +949,19 @@ export class GameService {
               }
             : p
         );
+
+        if (zonesMode) {
+          const capture = tryCaptureZone(
+            zones,
+            board,
+            puzzle,
+            solution,
+            row,
+            col,
+            cellOwners[ownerKey] || user.uid
+          );
+          zones = capture.zones;
+        }
       }
 
       const lastMoves = { ...(data.lastMoves || {}) };
@@ -817,6 +971,8 @@ export class GameService {
         boards: flattenBoards(boards),
         players,
         lastMoves,
+        cellOwners,
+        zones,
         updatedAt: FieldValue.serverTimestamp(),
       });
 
@@ -868,9 +1024,10 @@ export class GameService {
       let row = targetRow;
       let col = targetCol;
       if (row == null && col == null) {
+        const targetBoard = getActiveBoard(data, opponent.uid);
         const target = pickRandomAttackTarget(
           attackType,
-          data.boards[opponent.uid],
+          targetBoard,
           data.puzzle
         );
         row = target.targetRow;

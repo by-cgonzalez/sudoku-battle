@@ -37,6 +37,7 @@ import {
 } from "../lib/features";
 import {
   DEFAULT_CAPTURE_COLOR,
+  SHARED_BOARD_KEY,
   ZONE_WIN_THRESHOLD,
   countZonesFor,
   getCaptureColor,
@@ -91,7 +92,14 @@ export function GameScreen() {
   const me = room && user ? getMe(room) : null;
   const opponent = room && user ? getOpponent(room) : null;
   const attacks = room?.attacks || [];
-  const myBoard = room && user ? room.boards[user.uid] : null;
+  const isZones = room?.battleMode === "zones";
+  const myBoard =
+    room && user
+      ? isZones
+        ? room.boards?.[SHARED_BOARD_KEY] || room.boards?.[user.uid] || null
+        : room.boards?.[user.uid] || null
+      : null;
+  // Freeze / blocks only lock the affected player's local input — shared board stays live for the other.
   const frozen = user ? isInputFrozen(attacks, user.uid) : false;
   const activeAttacks = user ? getActiveAttacks(attacks, user.uid) : [];
   const diff = getDifficulty(room?.difficulty);
@@ -100,9 +108,8 @@ export function GameScreen() {
   const won = room?.winner === user?.uid;
   const myScore = playerScore(me);
   const boardDone = Boolean(me?.boardCompleted);
-  const isZones = room?.battleMode === "zones";
   const waitingForOpponent =
-    (room?.battleMode === "score" || isZones) && boardDone && !finished;
+    room?.battleMode === "score" && boardDone && !finished;
   const inputLocked = frozen || finished || boardDone;
   const zones = normalizeZones(room?.zones);
   const myZones = user ? countZonesFor(zones, user.uid) : 0;
@@ -112,15 +119,41 @@ export function GameScreen() {
   const myStreak = me?.streak || 0;
   const myStreakMult = streakMultiplier(myStreak);
 
-  const zoneTints = useMemo(() => {
-    if (!isZones || !user) return null;
+  const colorForUid = useCallback(
+    (uid) => {
+      if (!uid) return null;
+      if (uid === user?.uid) return myCapture.hex;
+      if (uid === opponent?.uid) return oppCapture.hex;
+      const p = room?.players?.find((x) => x.uid === uid);
+      return getCaptureColor(p?.captureColor || DEFAULT_CAPTURE_COLOR).hex;
+    },
+    [user?.uid, opponent?.uid, myCapture.hex, oppCapture.hex, room?.players]
+  );
+
+  /** Per-cell placer color on the shared board. */
+  const cellTints = useMemo(() => {
+    if (!isZones || !room?.cellOwners) return null;
     const map = new Map();
-    for (let i = 0; i < 9; i++) {
-      if (zones[i] !== user.uid) continue;
-      for (const key of zoneCellKeys(i)) map.set(key, myCapture.hex);
+    for (const [key, uid] of Object.entries(room.cellOwners)) {
+      const hex = colorForUid(uid);
+      if (hex) map.set(key, hex);
     }
     return map;
-  }, [isZones, user, zones, myCapture.hex]);
+  }, [isZones, room?.cellOwners, colorForUid]);
+
+  /** Perimeter tint for fully captured blocks (both players). */
+  const zoneTints = useMemo(() => {
+    if (!isZones) return null;
+    const map = new Map();
+    for (let i = 0; i < 9; i++) {
+      const owner = zones[i];
+      if (!owner) continue;
+      const hex = colorForUid(owner);
+      if (!hex) continue;
+      for (const key of zoneCellKeys(i)) map.set(key, hex);
+    }
+    return map;
+  }, [isZones, zones, colorForUid]);
 
   const conflictCells = useMemo(() => {
     if (!options.conflicts || !myBoard || !room?.puzzle) return null;
@@ -138,6 +171,15 @@ export function GameScreen() {
       setSelectedCell(cell);
       setNotes((prev) => toggleNoteValue(prev, row, col, value));
       return;
+    }
+
+    const owner = room.cellOwners?.[`${row}-${col}`] || null;
+    if (isZones && myBoard?.[row]?.[col]) {
+      if (value !== 0) return;
+      if (owner && owner !== user.uid) {
+        setStatus({ message: "Solo puedes borrar tus propias casillas", type: "error" });
+        return;
+      }
     }
 
     try {
@@ -204,7 +246,7 @@ export function GameScreen() {
       setWrongCell({ row, col });
       setTimeout(() => setWrongCell(null), 500);
     }
-  }, [selectedCell, room, user, frozen, boardDone, options.notes, draftMode, myBoard, gameService]);
+  }, [selectedCell, room, user, frozen, boardDone, options.notes, draftMode, myBoard, gameService, isZones]);
 
   const handleJoystickInput = useCallback(
     (row, col, value) => {
@@ -310,6 +352,24 @@ export function GameScreen() {
     return () => clearInterval(id);
   }, [options.timer, room, finished]);
 
+  // Clear local notes when the shared board fills a cell (e.g. rival placed it).
+  useEffect(() => {
+    if (!isZones || !myBoard) return;
+    setNotes((prev) => {
+      let next = null;
+      for (const key of Object.keys(prev)) {
+        const [rs, cs] = key.split("-");
+        const r = Number(rs);
+        const c = Number(cs);
+        if (myBoard[r]?.[c]) {
+          if (!next) next = { ...prev };
+          delete next[key];
+        }
+      }
+      return next || prev;
+    });
+  }, [isZones, myBoard]);
+
   if (!room || !user) return null;
 
   const handleCellClick = (row, col, fixed, blocked) => {
@@ -325,14 +385,13 @@ export function GameScreen() {
   const canHintNow = Boolean(selectedCell) && hintCheck.ok && hintsEnabled;
   const attackRegen = getAttackRegenInfo(room.startedAt);
   const attackLimit = attackRegen.limit;
-  const myLeadValue = isZones
-    ? myZones
-    : room.battleMode === "score"
+  // Zones mode keeps the same points economy (streak, line/block bonuses, shop).
+  const myLeadValue =
+    room.battleMode === "score" || isZones
       ? myScore
       : me?.solvedCount || 0;
-  const oppLeadValue = isZones
-    ? oppZones
-    : room.battleMode === "score"
+  const oppLeadValue =
+    room.battleMode === "score" || isZones
       ? playerScore(opponent)
       : opponent?.solvedCount || 0;
   const iLead = myLeadValue > oppLeadValue;
@@ -529,11 +588,10 @@ export function GameScreen() {
           </div>
           {waitingForOpponent && (
             <p className="waiting-banner-inline">
-              ¡Completaste! Esperando a {oppName} para cerrar
-              {isZones ? " por zonas" : " por puntos"}…
+              ¡Completaste! Esperando a {oppName} para cerrar por puntos…
             </p>
           )}
-          {(room.battleMode === "score" || isZones) &&
+          {room.battleMode === "score" &&
             opponent?.boardCompleted &&
             !finished &&
             !boardDone && (
@@ -544,60 +602,62 @@ export function GameScreen() {
           {options.notes && draftMode && (
             <p className="draft-banner">Modo notas activo — los dígitos son solo candidatos</p>
           )}
-          <div className="board-stage">
-            <aside className="board-left-rail">
-              <StreakRail streak={myStreak} multiplier={myStreakMult} />
-              <PointsRail pointsGain={pointsGain} />
-              {isZones && (
-                <ZonesMap
-                  zones={zones}
-                  meUid={user.uid}
-                  oppUid={opponent?.uid}
-                  myColor={myCapture.hex}
-                  oppColor={oppCapture.hex}
-                  threshold={ZONE_WIN_THRESHOLD}
+          <div className="board-play-column">
+            <div className="board-stage">
+              <aside className="board-left-rail">
+                <StreakRail streak={myStreak} multiplier={myStreakMult} />
+                <PointsRail pointsGain={pointsGain} />
+                {isZones && (
+                  <ZonesMap
+                    zones={zones}
+                    meUid={user.uid}
+                    oppUid={opponent?.uid}
+                    myColor={myCapture.hex}
+                    oppColor={oppCapture.hex}
+                  />
+                )}
+              </aside>
+              <div className="board-wrapper">
+                {frozen && !boardDone && (
+                  <div className="frozen-overlay">
+                    <span>❄️ Entrada congelada</span>
+                  </div>
+                )}
+                {waitingForOpponent && (
+                  <div className="frozen-overlay waiting-overlay">
+                    <span>⏳ Esperando al rival</span>
+                  </div>
+                )}
+                <SudokuBoard
+                  board={myBoard}
+                  puzzle={room.puzzle}
+                  attacks={attacks}
+                  playerId={user.uid}
+                  selectedCell={selectedCell}
+                  onCellClick={handleCellClick}
+                  onJoystickInput={handleJoystickInput}
+                  joystickEnabled={!inputLocked}
+                  draftMode={options.notes && draftMode}
+                  wrongCell={wrongCell}
+                  notes={options.notes ? notes : {}}
+                  conflictCells={conflictCells}
+                  celebrateCells={celebrateCells}
+                  cellTints={cellTints}
+                  zoneTints={zoneTints}
+                  boardSize={boardSize}
                 />
-              )}
-            </aside>
-            <div className="board-wrapper">
-              {frozen && !boardDone && (
-                <div className="frozen-overlay">
-                  <span>❄️ Entrada congelada</span>
-                </div>
-              )}
-              {waitingForOpponent && (
-                <div className="frozen-overlay waiting-overlay">
-                  <span>⏳ Esperando al rival</span>
-                </div>
-              )}
-              <SudokuBoard
-                board={myBoard}
-                puzzle={room.puzzle}
-                attacks={attacks}
-                playerId={user.uid}
-                selectedCell={selectedCell}
-                onCellClick={handleCellClick}
-                onJoystickInput={handleJoystickInput}
-                joystickEnabled={!inputLocked}
-                draftMode={options.notes && draftMode}
-                wrongCell={wrongCell}
-                notes={options.notes ? notes : {}}
-                conflictCells={conflictCells}
-                celebrateCells={celebrateCells}
-                zoneTints={zoneTints}
-                boardSize={boardSize}
-              />
+              </div>
             </div>
+            <Numpad
+              frozen={inputLocked}
+              draftMode={options.notes && draftMode}
+              onInput={handleNumberInput}
+              onClear={() => handleNumberInput(0)}
+              boardSize={boardSize}
+              completedDigits={completedDigits}
+            />
+            <p className="keyboard-hint desktop-hint">{shortcuts}</p>
           </div>
-          <Numpad
-            frozen={inputLocked}
-            draftMode={options.notes && draftMode}
-            onInput={handleNumberInput}
-            onClear={() => handleNumberInput(0)}
-            boardSize={boardSize}
-            completedDigits={completedDigits}
-          />
-          <p className="keyboard-hint desktop-hint">{shortcuts}</p>
 
           <p className={`status-message mobile-status ${status.type}`}>{status.message}</p>
 
@@ -629,30 +689,17 @@ export function GameScreen() {
             <div className="waiting-banner card-small">
               <strong>¡Completaste tu sudoku!</strong>
               <p>
-                Esperando a que {oppName} termine para definir el ganador
-                {isZones ? " por zonas" : " por puntos"}.
+                Esperando a que {oppName} termine para definir el ganador por puntos.
               </p>
             </div>
           )}
-          {(room.battleMode === "score" || isZones) &&
+          {room.battleMode === "score" &&
             opponent?.boardCompleted &&
             !finished &&
             !boardDone && (
             <div className="waiting-banner rival-done card-small">
               <strong>{oppName} ya terminó</strong>
               <p>Completa tu tablero para cerrar la ronda.</p>
-            </div>
-          )}
-
-          {isZones && (
-            <div className="zones-legend card-small">
-              <p>
-                <span className="zones-swatch" style={{ background: myCapture.hex }} /> Tú ·{" "}
-                <span className="zones-swatch" style={{ background: oppCapture.hex }} /> {oppName}
-              </p>
-              <p className="shop-meta">
-                Zonas {myZones}–{oppZones} · meta {ZONE_WIN_THRESHOLD}
-              </p>
             </div>
           )}
 
