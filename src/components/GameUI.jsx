@@ -53,6 +53,7 @@ export function SudokuBoard({
   notes = {},
   highlight = true,
   conflictCells = null,
+  celebrateCells = null,
   boardSize = DEFAULT_BOARD_SIZE,
 }) {
   const sizePx = getBoardSize(boardSize).px;
@@ -83,6 +84,7 @@ export function SudokuBoard({
             const selected = selectedCell?.row === r && selectedCell?.col === c;
             const wrong = wrongCell?.row === r && wrongCell?.col === c;
             const inConflict = conflictCells?.has(notesKey(r, c));
+            const celebrating = celebrateCells?.has(notesKey(r, c));
             const cellNotes = !value ? notes[notesKey(r, c)] || [] : [];
             const related =
               highlight &&
@@ -104,6 +106,7 @@ export function SudokuBoard({
               selected && "selected",
               wrong && "wrong",
               inConflict && "conflict",
+              celebrating && "celebrate",
               related && "related",
               sameNumber && "same-number",
               digitComplete && "digit-complete",
@@ -311,12 +314,13 @@ export function MatchHud({
   attackRegen = null,
   iLead = false,
   oppLeads = false,
+  pointsGain = null,
 }) {
   const pct =
     totalEmpty > 0 ? Math.min(100, Math.round((myProgress / totalEmpty) * 100)) : 0;
 
   return (
-    <div className={`match-hud match-hud-${variant}`}>
+    <div className={`match-hud match-hud-${variant}${pointsGain ? " hud-score-flash" : ""}`}>
       <div className="match-hud-row">
         {difficultyLabel && (
           <div className="match-hud-chip">
@@ -330,14 +334,19 @@ export function MatchHud({
             <strong>{formatHudTime(elapsed)}</strong>
           </div>
         )}
-        <div className={`match-hud-chip ${iLead ? "leading" : ""}`}>
+        <div className={`match-hud-chip match-hud-score ${iLead ? "leading" : ""}`}>
           <span className="match-hud-k">
             {iLead ? "👑 " : ""}
             {progressLabel}
           </span>
-          <strong>
+          <strong className="match-hud-score-value">
             {myProgress}/{totalEmpty}
             {myScore != null ? ` · ${myScore}pts` : ""}
+            {pointsGain != null && pointsGain.total > 0 && (
+              <span className="hud-score-float" key={pointsGain.id || pointsGain.total}>
+                +{pointsGain.total}
+              </span>
+            )}
           </strong>
         </div>
         {oppProgress != null && (
@@ -397,7 +406,14 @@ export function MatchHud({
   );
 }
 
-export function ScorePanel({ me, opponent, battleMode = "race", mistakes = 0 }) {
+export function ScorePanel({
+  me,
+  opponent,
+  battleMode = "race",
+  mistakes = 0,
+  pointsGain = null,
+  scorePulse = false,
+}) {
   const mode = getBattleMode(battleMode);
   const myScore = playerScore(me);
   const oppScore = playerScore(opponent);
@@ -412,18 +428,36 @@ export function ScorePanel({ me, opponent, battleMode = "race", mistakes = 0 }) 
 
   return (
     <div className="score-panel score-panel-minimal" title={mode.desc}>
-      <div className={`score-side me ${iLead ? "leading" : ""} ${me?.boardCompleted ? "done" : ""}`}>
+      <div
+        className={`score-side me ${iLead ? "leading" : ""} ${me?.boardCompleted ? "done" : ""} ${scorePulse ? "score-pulse" : ""}`}
+      >
         <div className="score-identity">
           {iLead && <span className="score-crown" aria-hidden="true">👑</span>}
           <span className="score-name">Tú{me?.boardCompleted ? " ✓" : ""}</span>
         </div>
-        <strong className="score-num">{myValue}</strong>
-        <span className="score-meta">
+        <strong className="score-num">
+          {myValue}
+          {pointsGain != null && pointsGain > 0 && (
+            <span className="score-float" key={pointsGain.id || pointsGain.total}>
+              +{pointsGain.total}
+            </span>
+          )}
+        </strong>
+        <span className={`score-meta${scorePulse ? " score-meta-flash" : ""}`}>
           {battleMode === "score" ? `${mySolved} aciertos` : `${myScore} pts`}
           {(me?.streak || 0) >= 5 ? ` · racha ${me.streak}` : ""}
           {" · "}
           {mistakes}✗
         </span>
+        {pointsGain?.labels?.length > 0 && (
+          <div className="score-gain-chips" key={`chips-${pointsGain.id}`}>
+            {pointsGain.labels.map((label) => (
+              <span key={label} className="score-gain-chip">
+                {label}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
       <div className="score-center">
         <span className="vs-badge">VS</span>

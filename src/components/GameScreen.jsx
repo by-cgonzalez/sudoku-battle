@@ -18,6 +18,7 @@ import {
 } from "../lib/attacks";
 import {
   canUseHint,
+  celebrationCells,
   clearCellNotes,
   DEFAULT_BOARD_SIZE,
   formatElapsed,
@@ -27,6 +28,9 @@ import {
   MAX_HINTS,
   normalizeGameOptions,
   playerScore,
+  POINTS_PER_BLOCK,
+  POINTS_PER_HIT,
+  POINTS_PER_LINE,
   startedAtMs,
   streakMultiplier,
   toggleNoteValue,
@@ -43,6 +47,16 @@ import {
 } from "./GameUI";
 import { useSudokuKeyboard } from "../hooks/useSudokuKeyboard";
 
+function buildPointsGain(breakdown, id) {
+  if (!breakdown?.total) return null;
+  const labels = [`+${POINTS_PER_HIT} acierto`];
+  if (breakdown.completedRow) labels.push(`+${POINTS_PER_LINE} fila`);
+  if (breakdown.completedCol) labels.push(`+${POINTS_PER_LINE} columna`);
+  if (breakdown.completedBox) labels.push(`+${POINTS_PER_BLOCK} bloque`);
+  if (breakdown.mult > 1) labels.push(`×${breakdown.mult} racha`);
+  return { id, total: breakdown.total, labels };
+}
+
 export function GameScreen() {
   const { user } = useAuth();
   const { room, gameService, leaveRoom, getOpponent, getMe } = useGame();
@@ -58,6 +72,9 @@ export function GameScreen() {
   const [shopBusy, setShopBusy] = useState(false);
   const [mistakes, setMistakes] = useState(0);
   const [extrasOpen, setExtrasOpen] = useState(false);
+  const [pointsGain, setPointsGain] = useState(null);
+  const [scorePulse, setScorePulse] = useState(false);
+  const [celebrateCells, setCelebrateCells] = useState(null);
 
   const options = normalizeGameOptions(room?.options);
   const me = room && user ? getMe(room) : null;
@@ -114,8 +131,12 @@ export function GameScreen() {
           type: "",
         });
       } else if (result.wasCorrect) {
+        const breakdown = result.pointsBreakdown;
         const parts = [];
         if (result.pointsEarned > 0) parts.push(`+${result.pointsEarned} pts`);
+        if (breakdown?.completedRow) parts.push(`fila +${POINTS_PER_LINE}`);
+        if (breakdown?.completedCol) parts.push(`columna +${POINTS_PER_LINE}`);
+        if (breakdown?.completedBox) parts.push(`bloque +${POINTS_PER_BLOCK}`);
         if (result.streak >= 5) {
           parts.push(`racha ×${streakMultiplier(result.streak)}`);
         }
@@ -123,7 +144,29 @@ export function GameScreen() {
           parts.push(`crédito de ataque listo`);
         }
         if (parts.length > 0) {
-          setStatus({ message: parts.join(" · "), type: "" });
+          setStatus({ message: parts.join(" · "), type: "success" });
+        }
+
+        if (result.pointsEarned > 0) {
+          const burstId = `${Date.now()}-${result.pointsEarned}`;
+          const details = breakdown || {
+            total: result.pointsEarned,
+            mult: streakMultiplier(result.streak || 0),
+            completedRow: false,
+            completedCol: false,
+            completedBox: false,
+          };
+          setPointsGain(buildPointsGain(details, burstId));
+          setScorePulse(true);
+          const cells = celebrationCells(row, col, details);
+          if (cells.size > 0) {
+            setCelebrateCells(cells);
+            setTimeout(() => setCelebrateCells(null), 900);
+          }
+          setTimeout(() => {
+            setPointsGain(null);
+            setScorePulse(false);
+          }, 1400);
         }
       }
     } catch (err) {
@@ -415,6 +458,8 @@ export function GameScreen() {
                 opponent={opponent}
                 battleMode={room.battleMode || "race"}
                 mistakes={mistakes}
+                pointsGain={pointsGain}
+                scorePulse={scorePulse}
               />
             </div>
           </div>
@@ -433,6 +478,7 @@ export function GameScreen() {
             attackRegen={attackRegen}
             iLead={iLead}
             oppLeads={oppLeads}
+            pointsGain={pointsGain}
           />
 
           <div className="board-toolbar">
@@ -486,6 +532,7 @@ export function GameScreen() {
               wrongCell={wrongCell}
               notes={options.notes ? notes : {}}
               conflictCells={conflictCells}
+              celebrateCells={celebrateCells}
               boardSize={boardSize}
             />
           </div>

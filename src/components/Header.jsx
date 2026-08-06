@@ -11,7 +11,7 @@ import { RankingModal } from "./RankingModal";
 
 export function Header() {
   const { user, profileRevision } = useAuth();
-  const { screen, goHome, startSolo } = useGame();
+  const { screen, goHome, startSolo, gameService, enterRoom } = useGame();
   const [menuOpen, setMenuOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [joinOpen, setJoinOpen] = useState(false);
@@ -19,6 +19,7 @@ export function Header() {
   const [historyOpen, setHistoryOpen] = useState(false);
   const [inviteCode, setInviteCode] = useState("");
   const menuRef = useRef(null);
+  const inviteJoinStarted = useRef(false);
   void profileRevision;
 
   const inVersusMatch = screen === "game";
@@ -37,7 +38,7 @@ export function Header() {
   }, []);
 
   useEffect(() => {
-    if (!user || screen !== "lobby") return;
+    if (!user || screen !== "lobby" || inviteJoinStarted.current) return;
     let stored = "";
     try {
       stored = sessionStorage.getItem("sudoku-invite") || "";
@@ -45,14 +46,25 @@ export function Header() {
       stored = "";
     }
     if (!stored) return;
-    setInviteCode(stored);
-    setJoinOpen(true);
+
+    inviteJoinStarted.current = true;
     try {
       sessionStorage.removeItem("sudoku-invite");
     } catch {
       /* ignore */
     }
-  }, [user, screen]);
+
+    (async () => {
+      try {
+        const { roomId } = await gameService.joinRoom(stored);
+        enterRoom(roomId);
+      } catch {
+        inviteJoinStarted.current = false;
+        setInviteCode(stored);
+        setJoinOpen(true);
+      }
+    })();
+  }, [user, screen, gameService, enterRoom]);
 
   useEffect(() => {
     if (!menuOpen) return;

@@ -102,35 +102,82 @@ function isUnitSolved(board, puzzle, solution, cells) {
   return cells.every(({ r, c }) => cellValue(board, puzzle, r, c) === solution[r][c]);
 }
 
-/** Bonuses unlocked by completing the row/col/block that contain (row, col). */
-export function completionBonuses(board, puzzle, solution, row, col) {
-  let bonus = 0;
-
+/** Which units containing (row, col) are fully solved. */
+export function completedUnitsAt(board, puzzle, solution, row, col) {
   const rowCells = Array.from({ length: SIZE }, (_, c) => ({ r: row, c }));
-  if (isUnitSolved(board, puzzle, solution, rowCells)) bonus += POINTS_PER_LINE;
-
   const colCells = Array.from({ length: SIZE }, (_, r) => ({ r, c: col }));
-  if (isUnitSolved(board, puzzle, solution, colCells)) bonus += POINTS_PER_LINE;
-
   const br = Math.floor(row / 3) * 3;
   const bc = Math.floor(col / 3) * 3;
   const boxCells = [];
   for (let r = br; r < br + 3; r++) {
     for (let c = bc; c < bc + 3; c++) boxCells.push({ r, c });
   }
-  if (isUnitSolved(board, puzzle, solution, boxCells)) bonus += POINTS_PER_BLOCK;
+  return {
+    row: isUnitSolved(board, puzzle, solution, rowCells),
+    col: isUnitSolved(board, puzzle, solution, colCells),
+    box: isUnitSolved(board, puzzle, solution, boxCells),
+  };
+}
 
+/** Bonuses unlocked by completing the row/col/block that contain (row, col). */
+export function completionBonuses(board, puzzle, solution, row, col) {
+  const done = completedUnitsAt(board, puzzle, solution, row, col);
+  let bonus = 0;
+  if (done.row) bonus += POINTS_PER_LINE;
+  if (done.col) bonus += POINTS_PER_LINE;
+  if (done.box) bonus += POINTS_PER_BLOCK;
   return bonus;
 }
 
 /**
- * Points for a correct placement after `nextStreak` consecutive aciertos.
+ * Full scoring breakdown for a correct placement after `nextStreak` aciertos.
  * Multiplier applies to the full award (hit + line/block bonuses).
  */
-export function pointsForPlacement(board, puzzle, solution, row, col, nextStreak) {
-  const base = POINTS_PER_HIT + completionBonuses(board, puzzle, solution, row, col);
+export function scorePlacementDetails(board, puzzle, solution, row, col, nextStreak) {
+  const done = completedUnitsAt(board, puzzle, solution, row, col);
+  const hit = POINTS_PER_HIT;
+  const lineBonus =
+    (done.row ? POINTS_PER_LINE : 0) + (done.col ? POINTS_PER_LINE : 0);
+  const blockBonus = done.box ? POINTS_PER_BLOCK : 0;
+  const base = hit + lineBonus + blockBonus;
   const mult = streakMultiplier(nextStreak);
-  return Math.round(base * mult);
+  return {
+    total: Math.round(base * mult),
+    hit,
+    lineBonus,
+    blockBonus,
+    mult,
+    completedRow: done.row,
+    completedCol: done.col,
+    completedBox: done.box,
+  };
+}
+
+/**
+ * Points for a correct placement after `nextStreak` consecutive aciertos.
+ */
+export function pointsForPlacement(board, puzzle, solution, row, col, nextStreak) {
+  return scorePlacementDetails(board, puzzle, solution, row, col, nextStreak).total;
+}
+
+/** Cell keys ("r-c") for units completed by placing at (row, col). */
+export function celebrationCells(row, col, details) {
+  const cells = new Set();
+  if (!details) return cells;
+  if (details.completedRow) {
+    for (let c = 0; c < SIZE; c++) cells.add(`${row}-${c}`);
+  }
+  if (details.completedCol) {
+    for (let r = 0; r < SIZE; r++) cells.add(`${r}-${col}`);
+  }
+  if (details.completedBox) {
+    const br = Math.floor(row / 3) * 3;
+    const bc = Math.floor(col / 3) * 3;
+    for (let r = br; r < br + 3; r++) {
+      for (let c = bc; c < bc + 3; c++) cells.add(`${r}-${c}`);
+    }
+  }
+  return cells;
 }
 
 export function placementScoreKey(row, col) {

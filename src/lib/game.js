@@ -30,7 +30,7 @@ import {
   normalizeGameOptions,
   placementScoreKey,
   playerScore,
-  pointsForPlacement,
+  scorePlacementDetails,
 } from "./features";
 import { db, firebase } from "./firebase";
 
@@ -283,6 +283,48 @@ export class GameService {
     }
   }
 
+  /** Host-only: change difficulty while waiting (regenerates the puzzle). */
+  async updateDifficulty(roomId, difficultyId) {
+    const user = getCurrentUser();
+    const docRef = this.db.collection(ROOMS).doc(roomId);
+
+    return this.db.runTransaction(async (tx) => {
+      const roomSnap = await tx.get(docRef);
+      if (!roomSnap.exists) throw new Error("Sala no encontrada");
+
+      const data = parseRoomData(roomSnap.data());
+      if (data.status !== "waiting") {
+        throw new Error("Solo se puede cambiar la dificultad en la sala de espera");
+      }
+      if (data.hostId !== user.uid) {
+        throw new Error("Solo el anfitrión puede cambiar la dificultad");
+      }
+
+      const difficulty = getDifficulty(difficultyId);
+      if (data.difficulty === difficulty.id) {
+        return { difficulty: difficulty.id, unchanged: true };
+      }
+
+      const { puzzle, solution } = generateSudoku(difficulty.cellsToRemove);
+      const boards = {};
+      for (const p of data.players) {
+        boards[p.uid] = emptyPlayerBoard(puzzle);
+      }
+
+      tx.update(docRef, {
+        difficulty: difficulty.id,
+        difficultyLabel: difficulty.label,
+        puzzle: flattenGrid(puzzle),
+        solution: flattenGrid(solution),
+        boards: flattenBoards(boards),
+        lastMoves: {},
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+
+      return { difficulty: difficulty.id, unchanged: false };
+    });
+  }
+
   listenRoom(roomId, callback) {
     this.roomId = roomId;
     if (this.unsubscribe) this.unsubscribe();
@@ -347,6 +389,7 @@ export class GameService {
           fromHint: false,
           attackCreditEarned: false,
           pointsEarned: 0,
+          pointsBreakdown: null,
           waitingForOpponent: false,
           boardCompleted: false,
         };
@@ -368,6 +411,7 @@ export class GameService {
       }));
 
       let pointsEarned = 0;
+      let pointsBreakdown = null;
       let attackCreditEarned = false;
       let nextStreak = mePlayer?.streak || 0;
 
@@ -377,7 +421,7 @@ export class GameService {
           if (p.uid !== user.uid) return p;
           const streak = (p.streak || 0) + 1;
           const solvedCount = (p.solvedCount || 0) + 1;
-          const earned = pointsForPlacement(
+          const breakdown = scorePlacementDetails(
             board,
             puzzle,
             solution,
@@ -385,8 +429,10 @@ export class GameService {
             col,
             streak
           );
+          const earned = breakdown.total;
           const creditGain = shouldEarnAttackCredit(solvedCount) ? 1 : 0;
           pointsEarned = earned;
+          pointsBreakdown = breakdown;
           attackCreditEarned = creditGain > 0;
           nextStreak = streak;
           return {
@@ -465,6 +511,7 @@ export class GameService {
         streakBroken: false,
         streak: nextStreak,
         pointsEarned,
+        pointsBreakdown,
         attackCreditEarned,
         winner: updates.winner === user.uid,
         fromHint: false,
