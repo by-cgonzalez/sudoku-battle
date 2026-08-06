@@ -35,9 +35,19 @@ export const BATTLE_MODES = {
     icon: "🎯",
     desc: "Ambos completan el sudoku; gana quien tenga más puntos",
   },
+  zones: {
+    id: "zones",
+    label: "Guerra de zonas",
+    icon: "🗺️",
+    desc: "Captura bloques 3×3; gana con 5 zonas o más al final",
+  },
 };
 
 export const DEFAULT_BATTLE_MODE = "race";
+
+export function battleModeAllowsHints(battleModeId) {
+  return battleModeId !== "zones";
+}
 
 export const GAME_OPTIONS = {
   hints: {
@@ -77,9 +87,10 @@ export function getBattleMode(id) {
   return BATTLE_MODES[id] || BATTLE_MODES[DEFAULT_BATTLE_MODE];
 }
 
-export function normalizeGameOptions(options = {}) {
+export function normalizeGameOptions(options = {}, battleModeId = null) {
+  const hintsAllowed = battleModeId == null || battleModeAllowsHints(battleModeId);
   return {
-    hints: Boolean(options.hints ?? DEFAULT_GAME_OPTIONS.hints),
+    hints: hintsAllowed && Boolean(options.hints ?? DEFAULT_GAME_OPTIONS.hints),
     notes: Boolean(options.notes ?? DEFAULT_GAME_OPTIONS.notes),
     conflicts: Boolean(options.conflicts ?? DEFAULT_GAME_OPTIONS.conflicts),
     timer: Boolean(options.timer ?? DEFAULT_GAME_OPTIONS.timer),

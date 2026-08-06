@@ -51,22 +51,32 @@ export function LobbyScreen() {
   const [status, setStatus] = useState({ message: "", type: "" });
   const [diffOpen, setDiffOpen] = useState(false);
   const [modeOpen, setModeOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
 
   useEffect(() => {
     saveLobbyPrefs({ difficulty, battleMode, options });
   }, [difficulty, battleMode, options]);
 
+  useEffect(() => {
+    if (battleMode === "zones" && options.hints) {
+      setOptions((prev) => ({ ...prev, hints: false }));
+    }
+  }, [battleMode, options.hints]);
+
   const createRoom = async () => {
+    if (creating) return;
     try {
+      setCreating(true);
       setStatus({ message: "Creando sala...", type: "" });
       const { roomId } = await gameService.createRoom(
         difficulty,
         battleMode,
-        normalizeGameOptions(options)
+        normalizeGameOptions(options, battleMode)
       );
       enterRoom(roomId);
     } catch (err) {
       setStatus({ message: err.message, type: "error" });
+      setCreating(false);
     }
   };
 
@@ -95,7 +105,15 @@ export function LobbyScreen() {
             </p>
           </div>
 
-          <div className="card lobby-card create-room-card lobby-create-wide">
+          <div className={`card lobby-card create-room-card lobby-create-wide${creating ? " is-creating" : ""}`}>
+            {creating && (
+              <div className="create-room-loading" role="status" aria-live="polite">
+                <div className="create-room-loading-card">
+                  <span className="create-room-loading-spin" aria-hidden="true" />
+                  <strong>Creando sala...</strong>
+                </div>
+              </div>
+            )}
             <div className="create-room-header">
               <h2>Crear sala</h2>
               <p>Configura la partida e invita a tu rival.</p>
@@ -131,6 +149,7 @@ export function LobbyScreen() {
                         className={`mobile-picker-option${difficulty === d.id ? " selected" : ""}`}
                         style={{ "--diff-accent": d.accent }}
                         onClick={() => pickDifficulty(d.id)}
+                        disabled={creating}
                       >
                         <span className="mobile-picker-icon">{d.icon}</span>
                         <span className="mobile-picker-text">
@@ -166,6 +185,7 @@ export function LobbyScreen() {
                         type="button"
                         className={`mobile-picker-option${battleMode === mode.id ? " selected" : ""}`}
                         onClick={() => pickBattleMode(mode.id)}
+                        disabled={creating}
                       >
                         <span className="mobile-picker-icon">{mode.icon}</span>
                         <span className="mobile-picker-text">
@@ -188,6 +208,7 @@ export function LobbyScreen() {
                           value={d.id}
                           checked={difficulty === d.id}
                           onChange={() => setDifficulty(d.id)}
+                          disabled={creating}
                         />
                         <span
                           className="difficulty-card"
@@ -219,18 +240,21 @@ export function LobbyScreen() {
                   <label className="section-label">Modalidad battle</label>
                   <div className="battle-options">
                     {Object.values(BATTLE_MODES).map((mode) => (
-                      <label key={mode.id} className="battle-option">
+                      <label key={mode.id} className="battle-option" title={mode.desc}>
                         <input
                           type="radio"
                           name="battleMode"
                           value={mode.id}
                           checked={battleMode === mode.id}
                           onChange={() => setBattleMode(mode.id)}
+                          disabled={creating}
                         />
                         <span className="battle-card">
                           <span className="battle-icon">{mode.icon}</span>
-                          <span className="battle-name">{mode.label}</span>
-                          <span className="battle-desc">{mode.desc}</span>
+                          <span className="battle-copy">
+                            <span className="battle-name">{mode.label}</span>
+                            <span className="battle-desc">{mode.desc}</span>
+                          </span>
                         </span>
                       </label>
                     ))}
@@ -243,10 +267,13 @@ export function LobbyScreen() {
                   options={options}
                   onChange={setOptions}
                   compact
+                  battleMode={battleMode}
+                  readOnly={creating}
                 />
                 <p className="hint options-hint">
-                  Quien invita define estas opciones. También aplican en solitario (menú del
-                  perfil).
+                  {battleMode === "zones"
+                    ? "En Guerra de zonas no hay hints. Elige tu color de captura en la sala."
+                    : "Quien invita define estas opciones. También aplican en solitario (menú del perfil)."}
                 </p>
               </aside>
             </div>
@@ -255,12 +282,15 @@ export function LobbyScreen() {
               type="button"
               className="btn btn-primary btn-large create-room-cta"
               onClick={createRoom}
+              disabled={creating}
             >
-              Crear sala 1v1
+              {creating ? "Creando sala..." : "Crear sala 1v1"}
             </button>
           </div>
 
-          <p className={`status-message lobby-status ${status.type}`}>{status.message}</p>
+          {status.type === "error" && status.message ? (
+            <p className={`status-message lobby-status ${status.type}`}>{status.message}</p>
+          ) : null}
         </div>
       </div>
     </section>

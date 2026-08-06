@@ -11,6 +11,7 @@ import { GameService } from "../lib/game";
 import { HeadToHeadService } from "../lib/headToHead";
 import { getDifficulty } from "../lib/difficulty";
 import { canUseHint, HINT_COST, normalizeGameOptions, playerScore } from "../lib/features";
+import { countZonesFor, normalizeZones } from "../lib/zones";
 import { recordVersusMatch } from "../lib/matchHistory";
 import { generateSudoku, isBoardComplete } from "../lib/sudoku";
 import { useAuth } from "./AuthContext";
@@ -209,6 +210,8 @@ export function GameProvider({ children }) {
     const opponent = getOpponent(room);
     const won = room.winner === user.uid;
     const diff = getDifficulty(room.difficulty);
+    const zones = normalizeZones(room.zones);
+    const isZones = room.battleMode === "zones";
     void recordVersusMatch(user.uid, {
       roomId: room.id,
       finishedAt: Date.now(),
@@ -219,8 +222,12 @@ export function GameProvider({ children }) {
       battleMode: room.battleMode || "race",
       mySolved: me?.solvedCount || 0,
       oppSolved: opponent?.solvedCount || 0,
-      myScore: playerScore(me),
-      oppScore: playerScore(opponent),
+      myScore: isZones
+        ? countZonesFor(zones, user.uid)
+        : playerScore(me),
+      oppScore: isZones
+        ? countZonesFor(zones, opponent?.uid)
+        : playerScore(opponent),
       pointsEarned: won ? diff.winPoints : 5,
     });
   }, [room, user, rankingService, headToHeadService, getMe, getOpponent]);

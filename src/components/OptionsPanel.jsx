@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { GAME_OPTIONS } from "../lib/features";
+import { GAME_OPTIONS, battleModeAllowsHints } from "../lib/features";
 
 export function OptionsPanel({
   options,
@@ -9,22 +9,29 @@ export function OptionsPanel({
   compact = false,
   collapsible = false,
   defaultOpen = false,
+  battleMode = null,
 }) {
   const [open, setOpen] = useState(defaultOpen || readOnly);
+  const allowHints = battleModeAllowsHints(battleMode);
 
   const toggle = (id) => {
     if (readOnly || !onChange) return;
+    if (id === "hints" && !allowHints) return;
     onChange({ ...options, [id]: !options[id] });
   };
 
-  const enabledCount = Object.keys(GAME_OPTIONS).filter((id) => options?.[id]).length;
-  const enabledLabels = Object.values(GAME_OPTIONS)
+  const visibleOptions = Object.values(GAME_OPTIONS).filter(
+    (opt) => opt.id !== "hints" || allowHints
+  );
+
+  const enabledCount = visibleOptions.filter((opt) => options?.[opt.id]).length;
+  const enabledLabels = visibleOptions
     .filter((opt) => options?.[opt.id])
     .map((opt) => opt.label);
 
   const list = (
     <ul className="options-list">
-      {Object.values(GAME_OPTIONS).map((opt) => {
+      {visibleOptions.map((opt) => {
         const enabled = Boolean(options?.[opt.id]);
         return (
           <li key={opt.id} className={`options-item ${enabled ? "on" : ""}`} title={opt.desc}>
