@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useAuth } from "../contexts/AuthContext";
 import { useGame } from "../contexts/GameContext";
 import { MAX_PLAYERS } from "../lib/game";
-import { getDifficulty } from "../lib/difficulty";
+import { DIFFICULTIES, getDifficulty } from "../lib/difficulty";
 import {
   buildInviteText,
   getBattleMode,
@@ -61,6 +61,7 @@ export function RoomScreen() {
   const { room, rivalry, gameService, leaveRoom, getOpponent } = useGame();
   const [status, setStatus] = useState({ message: "", type: "" });
   const [copied, setCopied] = useState("");
+  const [diffBusy, setDiffBusy] = useState(false);
 
   const inviteUrl = room?.code ? getInviteUrl(room.code) : "";
   const qrSrc = useMemo(
@@ -91,6 +92,19 @@ export function RoomScreen() {
       setStatus({ message: "", type: "" });
     } catch (err) {
       setStatus({ message: err.message, type: "error" });
+    }
+  };
+
+  const changeDifficulty = async (difficultyId) => {
+    if (!isHost || diffBusy || difficultyId === room.difficulty) return;
+    try {
+      setDiffBusy(true);
+      await gameService.updateDifficulty(room.id, difficultyId);
+      setStatus({ message: "", type: "" });
+    } catch (err) {
+      setStatus({ message: err.message, type: "error" });
+    } finally {
+      setDiffBusy(false);
     }
   };
 
@@ -154,6 +168,43 @@ export function RoomScreen() {
               isHost={rival?.uid === room.hostId}
               waiting={!rival}
             />
+          </div>
+
+          <div className="room-diff-panel">
+            <div className="room-diff-header">
+              <h3>Dificultad</h3>
+              <p>
+                {isHost
+                  ? "Puedes cambiarla mientras esperas (regenera el sudoku)."
+                  : "Definida por el anfitrión."}
+              </p>
+            </div>
+            <div className="room-diff-options" role="group" aria-label="Dificultad de la sala">
+              {Object.values(DIFFICULTIES).map((d) => {
+                const selected = room.difficulty === d.id;
+                return (
+                  <button
+                    key={d.id}
+                    type="button"
+                    className={`room-diff-option${selected ? " selected" : ""}`}
+                    style={{ "--diff-accent": d.accent }}
+                    disabled={!isHost || diffBusy}
+                    onClick={() => changeDifficulty(d.id)}
+                    title={
+                      isHost
+                        ? `Cambiar a ${d.label}`
+                        : `${d.label} · solo el anfitrión puede cambiar`
+                    }
+                  >
+                    <span className="room-diff-icon" aria-hidden="true">
+                      {d.icon}
+                    </span>
+                    <span className="room-diff-name">{d.label}</span>
+                    <span className="room-diff-meta">+{d.winPoints} pts</span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           <p className="host-hint">
